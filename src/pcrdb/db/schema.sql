@@ -65,6 +65,7 @@ CREATE TABLE player_profile_snapshots (
     grand_arena_group SMALLINT,
     favorite_unit INTEGER,
     princess_knight_rank_total_exp BIGINT,
+    princess_knight_rank INTEGER,
     talent_quest_clear JSONB,
     user_comment TEXT,
     last_login_time TIMESTAMPTZ,
