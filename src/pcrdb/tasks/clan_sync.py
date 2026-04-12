@@ -73,7 +73,7 @@ def build_query_list(new_clan_add: int = 100) -> List[int]:
 
     if not active_clans:
         print("无活跃历史数据，执行默认初始化全量范围 1-5000")
-        return list(range(1, 5001))
+        return list(range(1, 52001))
 
     max_id = max(active_clans)
     
@@ -187,6 +187,79 @@ def insert_clan_batch(data_batch: List[Dict]):
         insert_snapshots_batch('player_clan_snapshots', member_records, collected_at=now)
 
 
+def deduplicate_player_clan_snapshots():
+    """
+    清理 player_clan_snapshots 表中每个 viewer_id 的旧记录，
+    仅保留 last_login_time 最新的那一条（若相同则保留 collected_at 最新的）。
+    """
+    print("正在进行玩家公会快照去重...")
+    start_time = time.time()
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # 使用窗口函数标记每个 viewer_id 内的行号，然后删除 rn > 1 的记录
+    delete_sql = """
+        DELETE FROM player_clan_snapshots
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY viewer_id, join_clan_name
+                           ORDER BY last_login_time DESC NULLS LAST, collected_at DESC
+                       ) AS rn
+                FROM player_clan_snapshots
+            ) t
+            WHERE rn > 1
+        )
+    """
+    cursor.execute(delete_sql)
+    deleted_count = cursor.rowcount
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    elapsed = time.time() - start_time
+    print(f"去重完成，删除了 {deleted_count} 条重复记录，耗时 {elapsed:.2f} 秒")
+    return deleted_count
+
+
+def deduplicate_clan_snapshots():
+    """
+    清理 clan_snapshots 表中 (clan_id, clan_name, leader_viewer_id) 组合的旧记录，
+    仅保留每个组合中 collected_at 最新的一条。
+    """
+    print("正在进行公会快照去重...")
+    start_time = time.time()
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    delete_sql = """
+        DELETE FROM clan_snapshots
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY clan_id, clan_name, leader_viewer_id
+                           ORDER BY collected_at DESC
+                       ) AS rn
+                FROM clan_snapshots
+            ) t
+            WHERE rn > 1
+        )
+    """
+    cursor.execute(delete_sql)
+    deleted_count = cursor.rowcount
+    conn.commit()
+    cursor.close()
+    conn.close()
+    
+    elapsed = time.time() - start_time
+    print(f"公会去重完成，删除了 {deleted_count} 条重复记录，耗时 {elapsed:.2f} 秒")
+    return deleted_count
+
+
 def run(new_clan_add: int = 100):
     """运行公会信息同步任务"""
     from db.task_logger import TaskLogger
@@ -230,6 +303,12 @@ def run(new_clan_add: int = 100):
         )
         
         queue.run()
+
+        #新增去重操作，清理玩家快照
+        deduplicate_player_clan_snapshots()
+        #新增去重操作，清理公会快照
+        deduplicate_clan_snapshots()
+
         task_logger.finish_success(records_fetched=fetch_counter['count'])
     except Exception as e:
         task_logger.finish_failed(str(e), records_fetched=fetch_counter['count'])
