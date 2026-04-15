@@ -14,13 +14,14 @@ sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 def cmd_task(args):
     """运行采集任务（日志记录已集成在各task模块内部）"""
-    from pcrdb.tasks import clan_sync, grand_sync, arena_deck_sync, player_profile_sync
+    from pcrdb.tasks import clan_sync, grand_sync, arena_deck_sync, player_profile_sync, daily_sync
     
     task_map = {
         'clan_sync': clan_sync.run,
         'grand_sync': grand_sync.run,
         'arena_deck_sync': arena_deck_sync.run,
         'player_profile_sync': player_profile_sync.run,
+        'daily_sync': daily_sync.run,  # 新增
     }
     
     if args.task_name not in task_map:
@@ -55,10 +56,13 @@ def main():
   grand_sync          同步PJJC排名数据
   arena_deck_sync     同步JJC防守阵容
   player_profile_sync 同步玩家档案
+  daily_sync          每日同步组合任务
 
 示例:
   python cli.py task clan_sync
   python cli.py task player_profile_sync --args mode=top_clans rank_limit=30
+  python cli.py task player_profile_sync --args mode=active_all clear_before=true
+  python cli.py task daily_sync              #同时完成clan_sync与player_profile_sync --args mode=active_all clear_before=true
 """
     )
     

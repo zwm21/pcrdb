@@ -33,6 +33,7 @@
 
    ```bash
    python cli.py task clan_sync
+   python cli.py task daily_sync
    ```
 
 ## 目录结构
@@ -85,6 +86,7 @@ python cli.py task <task_name> [args]
 | `grand_sync`          | 同步公主竞技场(PJJC)排名 | (无)                             |
 | `arena_deck_sync`     | 同步竞技场防守阵容       | (无)                             |
 | `player_profile_sync` | 同步玩家详细档案         | `mode=top_clans rank_limit=30` |
+| `daily_sync`          | 每日同步组合任务         | (无)                             |
 
 ### 示例
 
