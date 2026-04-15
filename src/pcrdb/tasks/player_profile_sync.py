@@ -220,15 +220,34 @@ def insert_profile_batch(data_batch: List[Dict], member_info: Dict):
         insert_snapshots_batch('player_profile_snapshots', records, collected_at=now)
 
 
-def run(mode: str = 'top_clans', rank_limit: int = 30):
+def run(mode: str = 'top_clans', rank_limit: int = 30, clear_before: bool = False):
     """
     运行玩家档案同步任务
-    
+
     Args:
         mode: 'top_clans' 每日模式（前N公会）, 'active_all' 月度模式（所有活跃玩家）
         rank_limit: 公会排名限制
+        clear_before: 是否在同步前清空 player_profile_snapshots 表
     """
     from db.task_logger import TaskLogger
+
+    # 处理命令行传入的字符串布尔值
+    if isinstance(clear_before, str):
+        clear_before = clear_before.lower() in ('true', '1', 'yes')
+
+    # 可选：清空历史数据
+    if clear_before:
+        print("=" * 60)
+        print("清空 player_profile_snapshots 表...")
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM player_profile_snapshots")
+        deleted_count = cursor.rowcount
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(f"已删除 {deleted_count} 条记录")
+        print("=" * 60)
     
     print("=" * 60)
     print("玩家档案同步任务 (PostgreSQL)")
