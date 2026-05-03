@@ -26,33 +26,18 @@ _EXP_LIST = [item[0] for item in _EXP_RANK_DATA]
 _RANK_LIST = [item[1] for item in _EXP_RANK_DATA]
 
 def _get_knight_rank_from_exp(exp: int) -> int:
-    """
-    根据总经验返回骑士等级
-    使用二分查找：找到最后一个 total_exp <= exp 的索引
-    """
-    # 二分查找插入点
+    """根据总经验返回骑士等级"""
     idx = bisect.bisect_right(_EXP_LIST, exp) - 1
     if idx < 0:
-        return _RANK_LIST[0]   # 经验小于最小阈值（0），返回等级1
+        return _RANK_LIST[0]
     return _RANK_LIST[idx]
 
 
 def get_target_players(mode: str = 'top_clans', rank_limit: int = 30) -> Tuple[List[int], Dict[int, Dict]]:
-    """
-    获取目标玩家列表
-    
-    Args:
-        mode: 'top_clans' 获取前N公会成员, 'active_all' 获取所有活跃高战力玩家
-        rank_limit: 公会排名限制（仅 top_clans 模式）
-    
-    Returns:
-        (viewer_ids, member_info_dict)
-    """
     conn = get_connection()
     cursor = conn.cursor()
     
     if mode == 'top_clans':
-        # 获取最新一次快照中排名前N的公会
         cursor.execute("""
             WITH latest_date AS (
                 SELECT DATE(MAX(collected_at)) as max_date
@@ -90,7 +75,6 @@ def get_target_players(mode: str = 'top_clans', rank_limit: int = 30) -> Tuple[L
         if not top_clans:
             return [], {}
         
-        # 获取这些公会的成员（仅最近30天的记录）
         clan_ids_tuple = tuple(top_clans)
         cursor.execute("""
             SELECT DISTINCT ON (viewer_id) 
@@ -116,7 +100,6 @@ def get_target_players(mode: str = 'top_clans', rank_limit: int = 30) -> Tuple[L
         return viewer_ids, member_info
     
     else:  # mode == 'active_all'
-        # 获取所有活跃高战力玩家
         cursor.execute("""
             SELECT DISTINCT ON (viewer_id) 
                 viewer_id, join_clan_id, join_clan_name
@@ -141,10 +124,10 @@ def get_target_players(mode: str = 'top_clans', rank_limit: int = 30) -> Tuple[L
         return viewer_ids, member_info
 
 
-def process_profile(profile_data: Dict[str, Any]) -> Dict[str, Any]:
+def process_profile(profile_data: Dict[str, Any], query_id=None) -> Dict[str, Any]:
     """
     处理玩家档案数据
-    提取所有字段（合并原 arena_sync 和 member_stats_sync 的字段）
+    新增 query_id 参数（兼容 base 的新调用方式，此处忽略）
     """
     if 'user_info' not in profile_data:
         return None
@@ -152,17 +135,13 @@ def process_profile(profile_data: Dict[str, Any]) -> Dict[str, Any]:
     user = profile_data['user_info']
     vid = user.get('viewer_id')
     
-    # 提取天赋关卡通关信息
     talent_quest = profile_data.get('quest_info', {}).get('talent_quest', {})
     talent_clear = [0, 0, 0, 0, 0]
     for idx, tq in enumerate(talent_quest):
         talent_clear[idx] = tq.get('clear_count', 0)
     
-    # 提取骑士经验
     princess_knight_exp = user.get('princess_knight_rank_total_exp', 0)
-
     favorite_unit_id = profile_data['favorite_unit']['id']
-
     user_comment = user.get('user_comment')
     
     return {
@@ -183,7 +162,6 @@ def process_profile(profile_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def insert_profile_batch(data_batch: List[Dict], member_info: Dict):
-    """批量插入玩家档案数据"""
     records = []
     now = datetime.now()
     
@@ -211,7 +189,7 @@ def insert_profile_batch(data_batch: List[Dict], member_info: Dict):
             'join_clan_id': info.get('join_clan_id'),
             'join_clan_name': info.get('join_clan_name'),
             'princess_knight_rank_total_exp': exp,
-            'princess_knight_rank': knight_rank,          # 新增字段
+            'princess_knight_rank': knight_rank,
             'talent_quest_clear': Json(data['talent_quest_clear'])
         }
         records.append(record)
@@ -220,15 +198,24 @@ def insert_profile_batch(data_batch: List[Dict], member_info: Dict):
         insert_snapshots_batch('player_profile_snapshots', records, collected_at=now)
 
 
-def run(mode: str = 'top_clans', rank_limit: int = 30):
-    """
-    运行玩家档案同步任务
-    
-    Args:
-        mode: 'top_clans' 每日模式（前N公会）, 'active_all' 月度模式（所有活跃玩家）
-        rank_limit: 公会排名限制
-    """
+def run(mode: str = 'top_clans', rank_limit: int = 30, clear_before: bool = False):
     from db.task_logger import TaskLogger
+
+    if isinstance(clear_before, str):
+        clear_before = clear_before.lower() in ('true', '1', 'yes')
+
+    if clear_before:
+        print("=" * 60)
+        print("清空 player_profile_snapshots 表...")
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM player_profile_snapshots")
+        deleted_count = cursor.rowcount
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(f"已删除 {deleted_count} 条记录")
+        print("=" * 60)
     
     print("=" * 60)
     print("玩家档案同步任务 (PostgreSQL)")
@@ -246,10 +233,8 @@ def run(mode: str = 'top_clans', rank_limit: int = 30):
     else:
         print(f"待查询成员: {records_expected} 人 (所有活跃高战力)")
     
-    # 用于累计实际获取的记录数
     fetch_counter = {'count': 0}
     
-    # 根据mode确定task_name
     task_name = 'player_profile_sync_monthly' if mode == 'active_all' else 'player_profile_sync'
     task_logger = TaskLogger(task_name)
     task_logger.start(
@@ -263,14 +248,13 @@ def run(mode: str = 'top_clans', rank_limit: int = 30):
         return
     
     try:
-        # 使用闭包传递 member_info 和计数
         def inserter_with_count(batch):
             fetch_counter['count'] += len(batch)
             insert_profile_batch(batch, member_info)
         
         queue = TaskQueue(
             query_list=viewer_ids,
-            data_processor=process_profile,
+            data_processor=process_profile,  # 现在签名匹配 (data, query_id)
             pg_inserter=inserter_with_count,
             sync_num=config['sync_num'],
             batch_size=config['batch_size']
@@ -284,5 +268,4 @@ def run(mode: str = 'top_clans', rank_limit: int = 30):
 
 
 if __name__ == '__main__':
-    # 默认每日模式：前30公会30
     run(mode='top_clans', rank_limit=30)
