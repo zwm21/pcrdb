@@ -4,10 +4,8 @@
 """
 import os
 import time
-import math
 import asyncio
-from datetime import datetime
-from typing import List, Dict, Any, Callable, Optional
+from typing import List, Dict, Any, Callable
 from pathlib import Path
 
 import sys
@@ -17,86 +15,127 @@ from api.endpoints import PCRApi, create_client
 from db.connection import get_accounts, Account
 
 
+def format_duration(seconds: float) -> str:
+    """将秒数格式化为 HH:MM:SS"""
+    seconds = max(0, int(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+class DataProcessError(Exception):
+    """数据处理返回 None 时抛出的异常"""
+    pass
+
+
 class TaskQueue:
     """
     并发任务队列
     支持多客户端并行采集，直接写入 PostgreSQL
     """
-    
+
     def __init__(
         self,
         query_list: List[int],
-        data_processor: Callable[[Dict], Any],
+        data_processor: Callable[[Dict, int], Any],  # 现在接收 (data, query_id)
         pg_inserter: Callable[[List[Dict]], None],
-        sync_num: int = 10,
+        sync_num: int = 20,
         batch_size: int = 30
     ):
-        """
-        初始化任务队列
-        
-        Args:
-            query_list: 查询 ID 列表
-            data_processor: 数据处理函数，返回 None 表示失败需重试
-            pg_inserter: PostgreSQL 插入函数 (接收 list of dict)
-            sync_num: 并发客户端数量 (最大)
-            batch_size: 每批处理数量
-        """
         self.query_list = query_list
-        # 去重query_list，防止重复查询
         if query_list:
-             self.query_list = sorted(list(set(query_list)))
-             
+            self.query_list = sorted(list(set(query_list)))
+
         self.data_processor = data_processor
         self.pg_inserter = pg_inserter
         self.sync_num = sync_num
         self.batch_size = batch_size
-        
-        # 自动判断查询类型：viewer_id > 1万亿
+
         self.query_type = 'profile' if self.query_list and self.query_list[0] > 1000000000000 else 'clan'
-    
+
+        # 用于保护同步插入函数的异步锁，确保同一时刻只有一个插入操作执行（线程安全）
+        self._db_lock = asyncio.Lock()
+
     async def _monitor(self):
         """进度监控协程"""
         last_log_time = 0
         while True:
             if self.processed_count >= self.total_tasks:
                 break
-                
+
             now = time.time()
-            if now - last_log_time >= 0.2: # 刷新频率提高
+            if now - last_log_time >= 0.2:
                 pct = self.processed_count / self.total_tasks if self.total_tasks > 0 else 0
                 elapsed = now - self.start_time
                 rate = self.processed_count / elapsed if elapsed > 0 else 0
                 eta = (self.total_tasks - self.processed_count) / rate if rate > 0 else 0
-                
-                # ASCII 进度条
-                # [██████████--------] 50.0% 500/1000 [10.5it/s] ETA: 00:45
+
                 bar_len = 30
                 filled_len = int(bar_len * pct)
                 bar = '█' * filled_len + '-' * (bar_len - filled_len)
-                
-                eta_str = time.strftime("%M:%S", time.gmtime(eta))
-                
-                sys.stdout.write(f"\r|{bar}| {pct:.1%} {self.processed_count}/{self.total_tasks} [{rate:.1f}it/s] ETA: {eta_str}")
+
+                eta_str = format_duration(eta)
+
+                sys.stdout.write(
+                    f"\r|{bar}| {pct:.1%} {self.processed_count}/{self.total_tasks} "
+                    f"[{rate:.1f}it/s] ETA: {eta_str}"
+                )
                 sys.stdout.flush()
                 last_log_time = now
-            
+
             await asyncio.sleep(0.1)
-            
+
         elapsed = time.time() - self.start_time
-        sys.stdout.write(f"\r|{'█'*30}| 100.0% {self.total_tasks}/{self.total_tasks} [{self.total_tasks/elapsed:.1f}it/s] Time: {elapsed:.1f}s\n")
+        sys.stdout.write(
+            f"\r|{'█' * 30}| 100.0% {self.total_tasks}/{self.total_tasks} "
+            f"[{self.total_tasks / elapsed:.1f}it/s] Time: {format_duration(elapsed)}\n"
+        )
         sys.stdout.flush()
+
+    async def _fetch_one(self, client, query_id: int):
+        """
+        对单个 query_id 发起请求，带重试逻辑。
+        成功返回 processed 数据，失败返回 None。
+        """
+        for retry in range(4):
+            try:
+                if self.query_type == 'clan':
+                    result = await client.query_clan(query_id)
+                else:
+                    result = await client.query_profile(query_id)
+
+                # 关键修改：传入 query_id，供 processor 使用（如解散时记录 clan_id）
+                processed = self.data_processor(result, query_id)
+                if processed is None:
+                    raise DataProcessError(f"Processed returned None for {query_id}")
+                return processed
+            except Exception as e:
+                if retry >= 3:
+                    return None
+
+                err_msg = str(e).lower()
+                if 'auth' in err_msg or 'login' in err_msg or 'unauthorized' in err_msg:
+                    try:
+                        await client.login()
+                    except Exception:
+                        pass
+                    wait = 1
+                else:
+                    wait = 2 ** retry
+
+                await asyncio.sleep(wait)
+
+        return None
 
     async def _worker(self, account_dict: Dict, client_index: int):
         """单个客户端工作协程"""
-        
-        # 1. 登录
         client = None
         try:
             client = await create_client(account_dict)
-        except Exception as e:
+        except Exception:
             return
 
-        # 2. 消费队列
         while True:
             batch = []
             try:
@@ -107,113 +146,69 @@ class TaskQueue:
                     batch.append(query_id)
             except asyncio.QueueEmpty:
                 pass
-            
+
             if not batch:
                 break
-                
-            data_batch = []
-            
-            for query_id in batch:
-                success = False
-                for retry in range(4):
-                    try:
-                        if self.query_type == 'clan':
-                            result = await client.query_clan(query_id)
-                        else:
-                            result = await client.query_profile(query_id)
-                        
-                        processed = self.data_processor(result)
-                        if processed:
-                            data_batch.append(processed)
-                            success = True
-                            break
-                        else:
-                            print(f"\n[DEBUG] Processed returned None for {query_id}")
-                    except Exception as e:
-                        print(f"\n[DEBUG] Query error for {query_id}: {e}")
-                    
-                if not success and retry < 3:
-                     # 必须使用 await asyncio.sleep，否则会阻塞整个线程
-                     await asyncio.sleep(2)  # 减少等待时间加快重试
-                     try:
-                         await client.login()
-                     except Exception as e:
-                         pass
-                
-                self.processed_count += 1
-                self.queue.task_done()
-            
+
+            tasks = [asyncio.create_task(self._fetch_one(client, qid)) for qid in batch]
+            results = await asyncio.gather(*tasks)
+
+            data_batch = [r for r in results if r is not None]
+            self.processed_count += len(batch)
+
             if self.pg_inserter and data_batch:
-                try:
-                    print(f"\n[DEBUG] Inserting {len(data_batch)} records...")
-                    self.pg_inserter(data_batch)
-                    print(f"[DEBUG] Insert done.")
-                except Exception as e:
-                    print(f"\nDB Error: {e}")
+                async with self._db_lock:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, self.pg_inserter, data_batch)
 
     async def _run_async(self):
-        """异步主函数"""
-        # 从数据库获取活跃账号
         accounts = get_accounts(active_only=True)
         if not accounts:
             print("错误: 没有找到活跃的采集账号 (is_active=True)")
             return
 
-        # 限制并发数不超过账号数
         actual_sync_num = min(self.sync_num, len(accounts))
         print(f"启动 {actual_sync_num} 个采集客户端...")
-        
-        # 初始化队列
+
         self.queue = asyncio.Queue()
         for qid in self.query_list:
             self.queue.put_nowait(qid)
-        
-        # 进度追踪
+
         self.total_tasks = len(self.query_list)
         self.processed_count = 0
         self.start_time = time.time()
-        
-        # 启动监控协程
+
         monitor_task = asyncio.create_task(self._monitor())
 
         tasks = []
         for i in range(actual_sync_num):
             account_data = accounts[i]
-            
-            # 转换为 create_client 需要的字典格式
             acc_dict = {
                 'vid': account_data.viewer_id,
                 'uid': str(account_data.uid),
                 'access_key': account_data.access_key
             }
-            
-            # 直接传递 dict 给 worker
             task = asyncio.create_task(self._worker(acc_dict, i))
             tasks.append(task)
-            # 错峰启动，避免并发登录拥堵
-            await asyncio.sleep(0.5)
-        
+            await asyncio.sleep(0.25)
+
         if tasks:
             await asyncio.gather(*tasks)
-            # 等待监控结束 (tasks done -> monitor loop break)
             await monitor_task
         else:
             print("没有成功启动任何客户端任务")
-    
+
     def run(self):
-        """运行任务队列"""
         start = time.time()
-        
-        # 在 Windows 上使用 WindowsSelectorEventLoopPolicy
         if os.name == 'nt':
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        
+
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
             loop.run_until_complete(self._run_async())
         finally:
             loop.close()
-        
+
         elapsed = time.time() - start
-        print(f"任务完成，耗时 {elapsed:.2f} 秒")
+        print(f"任务完成，总耗时 {format_duration(elapsed)}")
