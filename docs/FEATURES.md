@@ -1,9 +1,21 @@
 # pcrdb 功能概览
-
 公主连结渠道服数据采集与分析系统 (PostgreSQL 版)
+---
+sql bin目录下
+psql -U postgres -d postgres
+password123456
+---
+python cli.py --help                     #帮助
+python cli.py task clan_sync             #同步公会数据
+python cli.py task grand_sync            #同步PJJC排名数据
+python cli.py task arena_deck_sync       #同步JJC防守阵容
+python cli.py task player_profile_sync   #同步玩家档案(默认前 30 公会)3000
+python cli.py task player_profile_sync --args mode=top_clans rank_limit=3000
+python cli.py task player_profile_sync --args mode=active_all  #同步玩家档案
+python scripts/apply_schema.py           #修复数据库
+python scripts/init_accounts.py          #添加/刷新掃描賬號
 
 ---
-
 ## 数据采集任务 (tasks/)
 
 | 任务 | 说明 | 写入表 |
@@ -29,7 +41,6 @@
 ---
 
 ### 完整功能清单（来自 _refer/）
-
 #### clan.py - 公会分析
 
 | 函数 | 说明 | 优先级 | 状态 |
