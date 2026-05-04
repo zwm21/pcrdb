@@ -16,6 +16,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from api.endpoints import PCRApi, create_client
 from db.connection import get_accounts, Account
 
+def format_duration(seconds: float) -> str:
+    """将秒数格式化为 HH:MM:SS"""
+    seconds = max(0, int(seconds))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 class TaskQueue:
     """
@@ -74,7 +81,7 @@ class TaskQueue:
                 filled_len = int(bar_len * pct)
                 bar = '█' * filled_len + '-' * (bar_len - filled_len)
                 
-                eta_str = time.strftime("%M:%S", time.gmtime(eta))
+                eta_str = format_duration(eta)
                 
                 sys.stdout.write(f"\r|{bar}| {pct:.1%} {self.processed_count}/{self.total_tasks} [{rate:.1f}it/s] ETA: {eta_str}")
                 sys.stdout.flush()
@@ -83,7 +90,8 @@ class TaskQueue:
             await asyncio.sleep(0.1)
             
         elapsed = time.time() - self.start_time
-        sys.stdout.write(f"\r|{'█'*30}| 100.0% {self.total_tasks}/{self.total_tasks} [{self.total_tasks/elapsed:.1f}it/s] Time: {elapsed:.1f}s\n")
+        sys.stdout.write(f"\r|{'█'*30}| 100.0% {self.total_tasks}/{self.total_tasks} "f"[{self.total_tasks / elapsed:.1f}it/s] Time: {format_duration(elapsed)}\n"
+        )
         sys.stdout.flush()
 
     async def _worker(self, account_dict: Dict, client_index: int):
@@ -216,4 +224,4 @@ class TaskQueue:
             loop.close()
         
         elapsed = time.time() - start
-        print(f"任务完成，耗时 {elapsed:.2f} 秒")
+        print(f"任务完成，总耗时 {format_duration(elapsed)}")

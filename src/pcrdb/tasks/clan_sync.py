@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tasks.base import TaskQueue
+from tasks.base import TaskQueue, format_duration
 from db.connection import get_connection, insert_snapshots_batch, get_config
 
 
@@ -69,7 +69,7 @@ def build_query_list(new_clan_add: int = 100) -> List[int]:
                 print(f"从生产库获取失败: {e}")
 
     query_cost = time.time() - start_time
-    print(f"构建列表耗时: {query_cost:.2f} 秒")
+    print(f"构建列表耗时: {format_duration(query_cost)}")
 
     if not active_clans:
         print("无活跃历史数据，执行默认初始化全量范围 1-5000")
@@ -220,7 +220,7 @@ def deduplicate_player_clan_snapshots():
     conn.close()
     
     elapsed = time.time() - start_time
-    print(f"去重完成，删除了 {deleted_count} 条重复记录，耗时 {elapsed:.2f} 秒")
+    print(f"去重完成，删除了 {deleted_count} 条重复记录，耗时 {format_duration(query_cost)}")
     return deleted_count
 
 
@@ -256,7 +256,7 @@ def deduplicate_clan_snapshots():
     conn.close()
     
     elapsed = time.time() - start_time
-    print(f"公会去重完成，删除了 {deleted_count} 条重复记录，耗时 {elapsed:.2f} 秒")
+    print(f"公会去重完成，删除了 {deleted_count} 条重复记录，耗时 {format_duration(query_cost)}")
     return deleted_count
 
 
