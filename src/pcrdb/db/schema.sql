@@ -57,6 +57,8 @@ CREATE TABLE player_profile_snapshots (
     team_level SMALLINT,
     unit_num SMALLINT,
     total_power INTEGER,
+    princess_knight_rank_total_exp BIGINT,   -- 移至 total_power 后
+    princess_knight_rank INTEGER,            -- 移至 total_power 后
     join_clan_id INTEGER,
     join_clan_name TEXT,
     arena_rank SMALLINT,
@@ -64,8 +66,7 @@ CREATE TABLE player_profile_snapshots (
     grand_arena_rank SMALLINT,
     grand_arena_group SMALLINT,
     favorite_unit INTEGER,
-    princess_knight_rank_total_exp BIGINT,
-    princess_knight_rank INTEGER,
+    favorite_unit_name TEXT,                 -- 新增列
     talent_quest_clear JSONB,
     user_comment TEXT,
     last_login_time TIMESTAMPTZ,
