@@ -155,7 +155,7 @@ def get_target_players(mode: str = 'top_clans', rank_limit: int = 30) -> Tuple[L
         return viewer_ids, member_info
 
 
-def process_profile(profile_data: Dict[str, Any]) -> Dict[str, Any]:
+def process_profile(profile_data: Dict[str, Any], query_id: int = None) -> Dict[str, Any]:
     """
     处理玩家档案数据
     提取所有字段（合并原 arena_sync 和 member_stats_sync 的字段）
