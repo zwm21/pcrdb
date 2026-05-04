@@ -14,13 +14,14 @@ sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 def cmd_task(args):
     """运行采集任务（日志记录已集成在各task模块内部）"""
-    from pcrdb.tasks import clan_sync, grand_sync, arena_deck_sync, player_profile_sync
+    from pcrdb.tasks import clan_sync, grand_sync, arena_deck_sync, player_profile_sync, daily_sync
     
     task_map = {
         'clan_sync': clan_sync.run,
         'grand_sync': grand_sync.run,
         'arena_deck_sync': arena_deck_sync.run,
         'player_profile_sync': player_profile_sync.run,
+        'daily_sync': daily_sync.run,  # 新增
     }
     
     if args.task_name not in task_map:
