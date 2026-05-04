@@ -69,6 +69,11 @@ def run():
     # 交互式询问
     print("\n--- 任务选项 ---")
     do_clan = ask_yes_no("是否执行阶段1: 公会信息同步？", default=True)
+
+    force_full_scan = False
+    if do_clan:
+        force_full_scan = ask_yes_no("阶段1是否开启全量扫描？(默认 N，全量将忽略活跃判断，扫描全部可能公会ID)", default=False)
+    
     do_profile = ask_yes_no("是否执行阶段2: 玩家档案同步（全量刷新）？", default=True)
     do_export = ask_yes_no("是否执行阶段3: 导出 CSV 文件？", default=True)
 
@@ -92,9 +97,8 @@ def run():
 
     # 执行阶段1
     if do_clan:
-        print("\n>>> 阶段 1/3: 公会信息同步")
-        print()
-        clan_sync.run()
+        print("\n>>> 阶段 1/3: 公会信息同步" + (" [全量]" if force_full_scan else "") + "\n")
+        clan_sync.run(force_full_scan=force_full_scan)
     else:
         print("已跳过阶段1")
 

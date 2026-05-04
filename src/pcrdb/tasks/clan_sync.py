@@ -14,10 +14,14 @@ from tasks.base import TaskQueue, format_duration
 from db.connection import get_connection, insert_snapshots_batch, get_config
 
 
-def build_query_list(new_clan_add: int = 100) -> List[int]:
+def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> List[int]:
     """
     构建待查询的公会 ID 列表
     定义活跃公会: 成员中最后一次登录时间在快照时间一个月之内
+
+    Args:
+        new_clan_add: 非全量月时，在最大已知 ID 之后额外探测的数量
+        force_full_scan: 强制全量扫描（忽略月份判断）
     """
     start_time = time.time()
     print("正在构建待查询公会列表...")
@@ -55,7 +59,7 @@ def build_query_list(new_clan_add: int = 100) -> List[int]:
                 import psycopg2
                 prod_cfg = get_config().copy()
                 prod_cfg['database'] = 'pcrdb'
-                
+
                 with psycopg2.connect(
                     host=prod_cfg['host'], port=prod_cfg['port'], 
                     user=prod_cfg['user'], password=prod_cfg['password'], 
@@ -71,22 +75,35 @@ def build_query_list(new_clan_add: int = 100) -> List[int]:
     query_cost = time.time() - start_time
     print(f"构建列表耗时: {format_duration(query_cost)}")
 
+    # 确定是否进行全量扫描
+    full_scan = force_full_scan or is_full_scan_month
+
+    if full_scan:
+        if active_clans:
+            max_id = max(active_clans)
+        else:
+            # 从 clan_snapshots 表中获取曾采集过的最大公会 ID
+            cursor.execute("SELECT COALESCE(MAX(clan_id), 0) FROM clan_snapshots")
+            max_id = cursor.fetchone()[0]
+            if max_id == 0:
+                print("无活跃历史数据，执行默认初始化全量范围 1-52000")
+                return list(range(1, 52001))
+
+        print(f"执行全量扫描 (1 ~ {max_id + 500})" + 
+              (" [强制]" if force_full_scan and not is_full_scan_month else ""))
+        return list(range(1, max_id + 500))
+
+    # 非全量月：活跃 + 探测
     if not active_clans:
-        print("无活跃历史数据，执行默认初始化全量范围 1-5000")
+        print("无活跃历史数据，执行默认初始化全量范围 1-52000")
         return list(range(1, 52001))
 
     max_id = max(active_clans)
     
-    if is_full_scan_month:
-        print(f"当前是 {now.month} 月，执行全量扫描 (1-{max_id + 500})")
-        return list(range(1, max_id + 500))
-    else:
-        # 添加新公会 ID
-        print(f"当前是 {now.month} 月，执行活跃扫描 (活跃: {len(active_clans)} + 新增探测: {new_clan_add})")
-        extra_clans = list(range(max_id + 1, max_id + new_clan_add + 1))
-        # 合并去重
-        final_list = sorted(list(set(active_clans + extra_clans)))
-        return final_list
+    print(f"当前是 {now.month} 月，执行活跃扫描 (活跃: {len(active_clans)} + 新增探测: {new_clan_add})")
+    extra_clans = list(range(max_id + 1, max_id + new_clan_add + 1))
+    final_list = sorted(list(set(active_clans + extra_clans)))
+    return final_list
 
 
 def process_clan_data(clan_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -260,17 +277,23 @@ def deduplicate_clan_snapshots():
     return deleted_count
 
 
-def run(new_clan_add: int = 100):
-    """运行公会信息同步任务"""
+def run(new_clan_add: int = 100, force_full_scan: bool = False):
+    """运行公会信息同步任务
+    
+    Args:
+        new_clan_add: 非全量月时探测的新 ID 数量
+        force_full_scan: 强制全量扫描（忽略月份与活跃判断）
+    """
     from db.task_logger import TaskLogger
     
     print("=" * 60)
-    print(f"公会信息同步任务 (PostgreSQL)")
+    print(f"公会信息同步任务 (PostgreSQL)" + 
+          (" [全量扫描模式]" if force_full_scan else ""))
     print("=" * 60)
     
     config = get_config()
     
-    query_list = build_query_list(new_clan_add)
+    query_list = build_query_list(new_clan_add, force_full_scan)
     query_count = len(query_list)
     print(f"待查询公会: {query_count} 个")
     
@@ -290,7 +313,8 @@ def run(new_clan_add: int = 100):
     task_logger = TaskLogger('clan_sync')
     task_logger.start(
         records_expected=records_expected, 
-        details={'new_clan_add': new_clan_add, 'query_count': query_count}
+        details={'new_clan_add': new_clan_add, 'query_count': query_count, 
+                 'force_full_scan': force_full_scan}
     )
     
     try:
