@@ -35,13 +35,18 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
     # SQL: 查找活跃公会
     # 逻辑: 按可以 join_clan_id 分组，如果该公会最新快照里有成员登录时间 > 快照时间 - 30天，则视为活跃
     # 注意: player_clan_snapshots 可能很大，这个查询可能慢，需关注性能
+    # 同时排除 clan_snapshots 中 exist=false 的公会（已解散）
     query_active_sql = """
-        SELECT join_clan_id 
-        FROM player_clan_snapshots
-        WHERE join_clan_id IS NOT NULL
-        GROUP BY join_clan_id
-        HAVING MAX(last_login_time) > MAX(collected_at) - INTERVAL '30 days'
-        ORDER BY join_clan_id
+        SELECT p.join_clan_id 
+        FROM player_clan_snapshots p
+        WHERE p.join_clan_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM clan_snapshots c 
+              WHERE c.clan_id = p.join_clan_id AND c.exist = FALSE
+          )
+        GROUP BY p.join_clan_id
+        HAVING MAX(p.last_login_time) > MAX(p.collected_at) - INTERVAL '30 days'
+        ORDER BY p.join_clan_id
     """
     
     cursor.execute(query_active_sql)
@@ -83,17 +88,23 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
             max_id = max(active_clans)
         else:
             # 从 clan_snapshots 表中获取曾采集过的最大公会 ID
-            cursor.execute("SELECT COALESCE(MAX(clan_id), 0) FROM clan_snapshots")
+            cursor.execute("SELECT COALESCE(MAX(clan_id), 0) FROM clan_snapshots WHERE exist = TRUE")
             max_id = cursor.fetchone()[0]
             if max_id == 0:
                 print("无活跃历史数据，执行默认初始化全量范围 1-52000")
                 return list(range(1, 52001))
 
-        print(f"执行全量扫描 (1 ~ {max_id + 500})" + 
-              (" [强制]" if force_full_scan and not is_full_scan_month else ""))
-        return list(range(1, max_id + 500))
+        if force_full_scan and not is_full_scan_month:
+            print(f"执行强制全量扫描 (1~{max_id + 500})")
+        else:
+            print(f"当前是 {now.month} 月，执行全量扫描 (1-{max_id + 500})")
+        # 全量扫描时也排除 exist=false 的公会（避免重复请求已解散公会）
+        cursor.execute("SELECT clan_id FROM clan_snapshots WHERE exist = FALSE")
+        disbanded = {r[0] for r in cursor.fetchall()}
+        full_list = [i for i in range(1, max_id + 500) if i not in disbanded]
+        return full_list
 
-    # 非全量月：活跃 + 探测
+    # 非全量月且非强制全量：活跃 + 探测
     if not active_clans:
         print("无活跃历史数据，执行默认初始化全量范围 1-52000")
         return list(range(1, 52001))
@@ -102,11 +113,14 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
     
     print(f"当前是 {now.month} 月，执行活跃扫描 (活跃: {len(active_clans)} + 新增探测: {new_clan_add})")
     extra_clans = list(range(max_id + 1, max_id + new_clan_add + 1))
-    final_list = sorted(list(set(active_clans + extra_clans)))
+    # 合并去重，额外排除解散公会
+    cursor.execute("SELECT clan_id FROM clan_snapshots WHERE exist = FALSE")
+    disbanded = {r[0] for r in cursor.fetchall()}
+    final_list = sorted(list(set(active_clans + extra_clans) - disbanded))
     return final_list
 
 
-def process_clan_data(clan_data: Dict[str, Any]) -> Dict[str, Any]:
+def process_clan_data(clan_data: Dict[str, Any], query_id: int = None) -> Dict[str, Any]:
     """
     处理公会 API 返回数据
     
@@ -124,6 +138,13 @@ def process_clan_data(clan_data: Dict[str, Any]) -> Dict[str, Any]:
     elif 'server_error' in clan_data:
         msg = clan_data.get('server_error', {}).get('message', '')
         if '此行会已解散' in msg:
+            # 标记为解散，记录 exist=false
+            if query_id is not None:
+                return {"type": "disband", "clan_id": query_id}
+            else:
+                # 没有 query_id 时无法记录，只能跳过
+                return None
+            
             # 标记为解散
             # query_clan 失败时没办法直接从 API 得到 ID，通常需要调用者知道 ID
             # 但在这里 process_clan_data 只接收结果。
@@ -139,7 +160,7 @@ def process_clan_data(clan_data: Dict[str, Any]) -> Dict[str, Any]:
             # 并没有传递 query_id。
             # 这是一个问题。不过通常 search result 会包含 ID。
             # 如果是解散，API 返回可能不包含 ID。
-            return None # 暂时跳过解散处理，或者需要修改 base.py 传入 query_id
+            #return None  暂时跳过解散处理，或者需要修改 base.py 传入 query_id
             
         elif '连接中断' in msg:
             return None  # 需要重试
@@ -155,6 +176,25 @@ def insert_clan_batch(data_batch: List[Dict]):
     now = datetime.now()
     
     for item in data_batch:
+        item_type = item.get('type')
+        if item_type == 'disband':
+            # 解散公会：仅插入一条 exist=false 的快照（无需成员数据）
+            clan_records.append({
+                'clan_id': item['clan_id'],
+                'clan_name': None,
+                'leader_viewer_id': None,
+                'leader_name': None,
+                'join_condition': None,
+                'activity': None,
+                'clan_battle_mode': None,
+                'member_num': None,
+                'current_period_ranking': None,
+                'grade_rank': None,
+                'description': None,
+                'exist': False
+            })
+            continue
+
         if item.get('type') != 'data':
             continue
             

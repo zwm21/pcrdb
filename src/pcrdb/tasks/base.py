@@ -130,7 +130,7 @@ class TaskQueue:
                         else:
                             result = await client.query_profile(query_id)
                         
-                        processed = self.data_processor(result)
+                        processed = self.data_processor(result, query_id)
                         if processed:
                             data_batch.append(processed)
                             success = True
