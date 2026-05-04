@@ -220,7 +220,7 @@ def deduplicate_player_clan_snapshots():
     conn.close()
     
     elapsed = time.time() - start_time
-    print(f"去重完成，删除了 {deleted_count} 条重复记录，耗时 {format_duration(query_cost)}")
+    print(f"去重完成，删除了 {deleted_count} 条重复记录，耗时 {format_duration(elapsed)}")
     return deleted_count
 
 
@@ -256,7 +256,7 @@ def deduplicate_clan_snapshots():
     conn.close()
     
     elapsed = time.time() - start_time
-    print(f"公会去重完成，删除了 {deleted_count} 条重复记录，耗时 {format_duration(query_cost)}")
+    print(f"公会去重完成，删除了 {deleted_count} 条重复记录，耗时 {format_duration(elapsed)}")
     return deleted_count
 
 
