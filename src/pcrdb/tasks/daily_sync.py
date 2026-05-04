@@ -72,10 +72,6 @@ def run():
     do_profile = ask_yes_no("是否执行阶段2: 玩家档案同步（全量刷新）？", default=True)
     do_export = ask_yes_no("是否执行阶段3: 导出 CSV 文件？", default=True)
 
-    # 如果是公会同步，进一步询问是否全量重扫
-    full_rescan = False
-    if do_clan:
-        full_rescan = ask_yes_no("是否启用全量重扫模式（扫描[1,52000]中未入库的公会）？", default=False)
 
     if do_export:
         print("\n--- 导出选项 ---")
@@ -97,10 +93,8 @@ def run():
     # 执行阶段1
     if do_clan:
         print("\n>>> 阶段 1/3: 公会信息同步")
-        if full_rescan:
-            print("（全量重扫模式已开启）")
         print()
-        clan_sync.run(full_rescan=full_rescan)
+        clan_sync.run()
     else:
         print("已跳过阶段1")
 
