@@ -196,10 +196,11 @@ def process_profile(profile_data: Dict[str, Any], query_id: int = None) -> Dict[
     }
 
 
-def insert_profile_batch(data_batch: List[Dict], member_info: Dict):
+def insert_profile_batch(data_batch: List[Dict], member_info: Dict, collected_at: datetime = None):
     """批量插入玩家档案数据"""
     records = []
-    now = datetime.now()
+    if collected_at is None:
+        collected_at = datetime.now()
     
     for data in data_batch:
         if not data:
@@ -233,7 +234,7 @@ def insert_profile_batch(data_batch: List[Dict], member_info: Dict):
         records.append(record)
     
     if records:
-        insert_snapshots_batch('player_profile_snapshots', records, collected_at=now)
+        insert_snapshots_batch('player_profile_snapshots', records, collected_at=collected_at)
 
 
 def run(mode: str = 'top_clans', rank_limit: int = 30, clear_before: bool = False):
@@ -280,6 +281,7 @@ def run(mode: str = 'top_clans', rank_limit: int = 30, clear_before: bool = Fals
     
     # 用于累计实际获取的记录数
     fetch_counter = {'count': 0}
+    collected_time = datetime.now()          # 本次采集的统一时间戳
     
     # 根据mode确定task_name
     task_name = 'player_profile_sync_monthly' if mode == 'active_all' else 'player_profile_sync'
@@ -298,7 +300,7 @@ def run(mode: str = 'top_clans', rank_limit: int = 30, clear_before: bool = Fals
         # 使用闭包传递 member_info 和计数
         def inserter_with_count(batch):
             fetch_counter['count'] += len(batch)
-            insert_profile_batch(batch, member_info)
+            insert_profile_batch(batch, member_info, collected_time)
         
         queue = TaskQueue(
             query_list=viewer_ids,
@@ -309,6 +311,21 @@ def run(mode: str = 'top_clans', rank_limit: int = 30, clear_before: bool = Fals
         )
         
         queue.run()
+
+        if viewer_ids:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""INSERT INTO player_clan_snapshots 
+                (viewer_id, collected_at, name, level, total_power, last_login_time, join_clan_id, join_clan_name)
+                SELECT pp.viewer_id, %s, pp.user_name, pp.team_level, pp.total_power, pp.last_login_time, 0, '0'
+                FROM player_profile_snapshots pp
+                WHERE pp.collected_at = %s AND pp.join_clan_id IS NULL
+                ON CONFLICT (viewer_id, collected_at) DO NOTHING
+            """, (collected_time, collected_time))
+            conn.commit()
+            cursor.close()
+            conn.close()
+
         task_logger.finish_success(records_fetched=fetch_counter['count'])
     except Exception as e:
         task_logger.finish_failed(str(e), records_fetched=fetch_counter['count'])
