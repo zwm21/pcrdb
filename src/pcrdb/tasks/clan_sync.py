@@ -263,7 +263,7 @@ def deduplicate_player_clan_snapshots():
                 SELECT id,
                        ROW_NUMBER() OVER (
                            PARTITION BY viewer_id, join_clan_name
-                           ORDER BY last_login_time DESC NULLS LAST, collected_at DESC
+                           ORDER BY collected_at DESC
                        ) AS rn
                 FROM player_clan_snapshots
             ) t
