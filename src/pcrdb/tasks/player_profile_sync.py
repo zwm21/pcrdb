@@ -104,15 +104,21 @@ def get_target_players(mode: str = 'top_clans', rank_limit: int = 30) -> Tuple[L
         if not top_clans:
             return [], {}
         
-        # 获取这些公会的成员（仅最近30天的记录）
+        # 获取这些公会的成员：仅取每个公会"最近一次采集"的在册名单，
+        # 天然排除已退会者，保证每个公会成员数不超过 30
         clan_ids_tuple = tuple(top_clans)
         cursor.execute("""
-            SELECT DISTINCT ON (viewer_id) 
-                viewer_id, join_clan_id, join_clan_name
-            FROM player_clan_snapshots
-            WHERE join_clan_id IN %s
-              AND collected_at > NOW() - INTERVAL '30 days'
-            ORDER BY viewer_id, collected_at DESC
+            WITH clan_latest AS (
+                SELECT join_clan_id, MAX(collected_at) AS latest
+                FROM player_clan_snapshots
+                WHERE join_clan_id IN %s
+                GROUP BY join_clan_id
+            )
+            SELECT p.viewer_id, p.join_clan_id, p.join_clan_name
+            FROM player_clan_snapshots p
+            JOIN clan_latest cl
+              ON p.join_clan_id = cl.join_clan_id
+             AND p.collected_at = cl.latest
         """, (clan_ids_tuple,))
         
         rows = cursor.fetchall()
@@ -130,14 +136,32 @@ def get_target_players(mode: str = 'top_clans', rank_limit: int = 30) -> Tuple[L
         return viewer_ids, member_info
     
     else:  # mode == 'active_all'
-        # 获取所有活跃高战力玩家
+        # 获取所有活跃高战力玩家；用"公会最近采集名单"判定当前归属：
+        # 玩家最新一条记录若早于其公会最近一次采集时间，说明已退会，
+        # 将 join_clan_id 置为 NULL（后续由 run() 末尾逻辑标记为无公会 0），
+        # 避免退会残留仍被计入旧公会导致导出人数超过 30
         cursor.execute("""
-            SELECT DISTINCT ON (viewer_id) 
-                viewer_id, join_clan_id, join_clan_name
-            FROM player_clan_snapshots
-            WHERE total_power > 1000000 
-              AND last_login_time > NOW() - INTERVAL '30 days'
-            ORDER BY viewer_id, collected_at DESC
+            WITH latest_member AS (
+                SELECT DISTINCT ON (viewer_id)
+                    viewer_id, join_clan_id, join_clan_name, collected_at
+                FROM player_clan_snapshots
+                WHERE total_power > 1000000
+                  AND last_login_time > NOW() - INTERVAL '30 days'
+                ORDER BY viewer_id, collected_at DESC
+            ),
+            clan_latest AS (
+                SELECT join_clan_id, MAX(collected_at) AS latest
+                FROM player_clan_snapshots
+                WHERE join_clan_id IS NOT NULL AND join_clan_id <> 0
+                GROUP BY join_clan_id
+            )
+            SELECT
+                lm.viewer_id,
+                CASE WHEN lm.collected_at = cl.latest THEN lm.join_clan_id  ELSE NULL END,
+                CASE WHEN lm.collected_at = cl.latest THEN lm.join_clan_name ELSE NULL END
+            FROM latest_member lm
+            LEFT JOIN clan_latest cl ON lm.join_clan_id = cl.join_clan_id
+            ORDER BY lm.viewer_id
         """)
         
         rows = cursor.fetchall()
