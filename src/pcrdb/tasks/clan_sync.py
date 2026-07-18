@@ -20,41 +20,38 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
     定义活跃公会: 成员中最后一次登录时间在快照时间一个月之内
 
     Args:
-        new_clan_add: 非全量月时，在最大已知 ID 之后额外探测的数量
-        force_full_scan: 强制全量扫描（忽略月份判断）
+        new_clan_add: 非全量时，在最大已知 ID 之后额外探测的数量
+        force_full_scan: 强制全量扫描
     """
     start_time = time.time()
     print("正在构建待查询公会列表...")
-    
+
     conn = get_connection()
     # Debug: Print current database
     print(f"Connected to Database: {get_config()['database']}")
-    
+
     cursor = conn.cursor()
-    
+
     # SQL: 查找活跃公会
     # 逻辑: 按可以 join_clan_id 分组，如果该公会最新快照里有成员登录时间 > 快照时间 - 30天，则视为活跃
     # 注意: player_clan_snapshots 可能很大，这个查询可能慢，需关注性能
     # 同时排除 clan_snapshots 中 exist=false 的公会（已解散）
     query_active_sql = """
-        SELECT p.join_clan_id 
+        SELECT p.join_clan_id
         FROM player_clan_snapshots p
         WHERE p.join_clan_id IS NOT NULL
           AND NOT EXISTS (
-              SELECT 1 FROM clan_snapshots c 
+              SELECT 1 FROM clan_snapshots c
               WHERE c.clan_id = p.join_clan_id AND c.exist = FALSE
           )
         GROUP BY p.join_clan_id
         HAVING MAX(p.last_login_time) > MAX(p.collected_at) - INTERVAL '30 days'
         ORDER BY p.join_clan_id
     """
-    
+
     cursor.execute(query_active_sql)
     active_clans = [r[0] for r in cursor.fetchall()]
-    
-    now = datetime.now()
-    is_full_scan_month = (now.month == 1 or now.month == 7)
-    
+
     # 如果是空库 (无历史数据) 且不是生产库，尝试从生产库获取种子列表 (仅用于测试验证)
     if not active_clans:
         current_db = get_config()['database']
@@ -66,8 +63,8 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
                 prod_cfg['database'] = 'pcrdb'
 
                 with psycopg2.connect(
-                    host=prod_cfg['host'], port=prod_cfg['port'], 
-                    user=prod_cfg['user'], password=prod_cfg['password'], 
+                    host=prod_cfg['host'], port=prod_cfg['port'],
+                    user=prod_cfg['user'], password=prod_cfg['password'],
                     database='pcrdb'
                 ) as prod_conn:
                     with prod_conn.cursor() as prod_cur:
@@ -80,10 +77,8 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
     query_cost = time.time() - start_time
     print(f"构建列表耗时: {format_duration(query_cost)}")
 
-    # 确定是否进行全量扫描
-    full_scan = force_full_scan or is_full_scan_month
-
-    if full_scan:
+    # === 强制全量扫描 ===
+    if force_full_scan:
         if active_clans:
             max_id = max(active_clans)
         else:
@@ -94,24 +89,21 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
                 print("无活跃历史数据，执行默认初始化全量范围 1-52000")
                 return list(range(1, 52001))
 
-        if force_full_scan and not is_full_scan_month:
-            print(f"执行强制全量扫描 (1~{max_id + 500})")
-        else:
-            print(f"当前是 {now.month} 月，执行全量扫描 (1-{max_id + 500})")
+        print(f"执行强制全量扫描 (1~{max_id + 500})")
         # 全量扫描时也排除 exist=false 的公会（避免重复请求已解散公会）
         cursor.execute("SELECT clan_id FROM clan_snapshots WHERE exist = FALSE")
         disbanded = {r[0] for r in cursor.fetchall()}
         full_list = [i for i in range(1, max_id + 500) if i not in disbanded]
         return full_list
 
-    # 非全量月且非强制全量：活跃 + 探测
+    # === 常规模式：活跃 + 探测 ===
     if not active_clans:
         print("无活跃历史数据，执行默认初始化全量范围 1-52000")
         return list(range(1, 52001))
 
     max_id = max(active_clans)
-    
-    print(f"当前是 {now.month} 月，执行活跃扫描 (活跃: {len(active_clans)} + 新增探测: {new_clan_add})")
+
+    print(f"执行活跃扫描 (活跃: {len(active_clans)} + 新增探测: {new_clan_add})")
     extra_clans = list(range(max_id + 1, max_id + new_clan_add + 1))
     # 合并去重，额外排除解散公会
     cursor.execute("SELECT clan_id FROM clan_snapshots WHERE exist = FALSE")
@@ -281,6 +273,76 @@ def deduplicate_player_clan_snapshots():
     return deleted_count
 
 
+def cleanup_phantom_clans():
+    """
+    清理"幽灵公会"记录：删除所有 clan_id 大于已确认存在的最大 clan_id 的记录。
+
+    原理：全量扫描时会对连续范围内的每个 ID 都发起 API 请求。对于从未被创建过
+    的高编号 clan_id，API 返回"此行会已解散"，被插入为 exist=false 记录。
+    这些记录对后续扫描没有价值（build_query_list 只用 exist=false 跳过已解散公会，
+    但高编号幽灵 ID 本来就不会在有效范围内），只会占用空间。
+
+    安全边界：以 MAX(clan_id WHERE exist=TRUE) 为界，只删除大于此值的记录。
+    真正解散过的公会的 exist=false 记录（其 clan_id ≤ max_true_id）会被完整保留，
+    用于后续扫描时直接跳过这些已知已解散的公会。
+    """
+    print("正在清理幽灵公会记录 (未创建过的 clan_id)...")
+    start_time = time.time()
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # 获取已确认存在过的最大 clan_id
+    cursor.execute("SELECT COALESCE(MAX(clan_id), 0) FROM clan_snapshots WHERE exist = TRUE")
+    max_true_id = cursor.fetchone()[0]
+
+    if max_true_id == 0:
+        # 没有任何成功采集记录，不执行清理（可能首次运行还没跑完）
+        conn.close()
+        print("  跳过清理：尚未发现任何有效的公会记录")
+        return 0
+
+    # 统计待清理数量（clan_id > 最大真实ID 且 exist=false）
+    count_sql = """
+        SELECT COUNT(*)
+        FROM clan_snapshots
+        WHERE clan_id > %s AND exist = FALSE
+    """
+    cursor.execute(count_sql, (max_true_id,))
+    to_delete = cursor.fetchone()[0]
+
+    if to_delete == 0:
+        print(f"无需清理（最大真实 clan_id: {max_true_id}）")
+        conn.close()
+        return 0
+
+    # 显示分布信息
+    dist_sql = """
+        SELECT MIN(clan_id) AS min_id, MAX(clan_id) AS max_id, COUNT(*) AS cnt
+        FROM clan_snapshots
+        WHERE clan_id > %s AND exist = FALSE
+    """
+    cursor.execute(dist_sql, (max_true_id,))
+    row = cursor.fetchone()
+    print(f"  发现 {to_delete} 条幽灵记录 "
+          f"(ID 范围: {row[0]} ~ {row[1]}, 有效上限: {max_true_id})")
+
+    # 执行删除
+    delete_sql = """
+        DELETE FROM clan_snapshots
+        WHERE clan_id > %s AND exist = FALSE
+    """
+    cursor.execute(delete_sql, (max_true_id,))
+    deleted_count = cursor.rowcount
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    elapsed = time.time() - start_time
+    print(f"幽灵公会清理完成，删除了 {deleted_count} 条无效记录，耗时 {format_duration(elapsed)}")
+    return deleted_count
+
+
 def deduplicate_clan_snapshots():
     """
     清理 clan_snapshots 表中 (clan_id, clan_name, leader_viewer_id) 组合的旧记录，
@@ -372,6 +434,8 @@ def run(new_clan_add: int = 100, force_full_scan: bool = False):
         deduplicate_player_clan_snapshots()
         #新增去重操作，清理公会快照
         deduplicate_clan_snapshots()
+        #清理幽灵公会记录（从不存在的高编号 clan_id 的 exist=false 记录）
+        cleanup_phantom_clans()
 
         task_logger.finish_success(records_fetched=fetch_counter['count'])
     except Exception as e:
