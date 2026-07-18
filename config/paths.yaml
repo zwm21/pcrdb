@@ -1,0 +1,11 @@
+# 路径配置
+# 各类输出/存储的目录路径，方便统一维护和修改
+
+# CSV 导出目录（daily_sync.py 使用）
+# 每次导出会在该目录下生成带时间戳的 .csv 文件
+# 默认: %LOCALAPPDATA%\pcrdb\csv (C 盘用户级本地缓存)
+csv_output_dir: "C:/Users/Hasee/AppData/Local/pcrdb/csv"
+
+# 其他路径可在此扩展（如日志目录、备份目录等）
+# log_dir: "D:/github/pcrdb/logs"
+# backup_dir: "D:/github/pcrdb/backups"

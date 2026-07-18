@@ -5,8 +5,31 @@
 """
 import os
 from datetime import datetime
+from pathlib import Path
+
+import yaml
+
 from pcrdb.tasks import clan_sync, player_profile_sync
 from pcrdb.db.connection import get_connection
+
+
+def _get_csv_output_dir() -> str:
+    """从 config/paths.yaml 读取 CSV 导出目录，配置文件缺失时使用默认值"""
+    # 配置文件路径: 项目根目录 / config / paths.yaml
+    config_path = Path(__file__).resolve().parent.parent.parent.parent / 'config' / 'paths.yaml'
+
+    # 默认路径: %LOCALAPPDATA%/pcrdb/csv (C 盘公共缓存，不依赖项目目录)
+    default_dir = os.path.join(os.path.expandvars('%LOCALAPPDATA'), 'pcrdb', 'csv')
+
+    if not config_path.exists():
+        return default_dir
+
+    try:
+        with open(config_path, encoding='utf-8') as f:
+            cfg = yaml.safe_load(f) or {}
+        return cfg.get('csv_output_dir', default_dir)
+    except Exception:
+        return default_dir
 
 
 def ask_yes_no(prompt, default=True):
@@ -91,8 +114,8 @@ def run():
     else:
         table_flags = {}
 
-    # 设置输出目录
-    output_dir = r'E:\思い出の扉\mzq\pcrdb\pcrdb-main\留档'
+    # 设置输出目录（从 config/paths.yaml 读取，缺失则使用默认值）
+    output_dir = _get_csv_output_dir()
     os.makedirs(output_dir, exist_ok=True)
 
     # 执行阶段1
