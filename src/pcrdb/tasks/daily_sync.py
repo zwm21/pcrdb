@@ -46,6 +46,44 @@ def ask_yes_no(prompt, default=True):
         print("请输入 y 或 n，或直接按回车")
 
 
+def _load_script_module(script_name: str):
+    """动态加载项目根目录 scripts/ 下的脚本为模块（脚本目录不在包内，无法直接 import）"""
+    import importlib.util
+    script_path = Path(__file__).resolve().parent.parent.parent.parent / 'scripts' / script_name
+    spec = importlib.util.spec_from_file_location(script_path.stem, script_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_account_import():
+    """阶段0.1: 调用 scripts/init_accounts.py 从 config/accounts.json 导入采集账号
+
+    仅执行增量导入（ON CONFLICT DO NOTHING）与账号展示，表不存在时才建表；
+    不调用其 DROP 重建逻辑，避免在每日流程中清掉现有账号的
+    viewer_id / 分组 / 启用状态（init_accounts.py 单独运行时才是全量重建语义）。
+    """
+    mod = _load_script_module('init_accounts.py')
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT to_regclass('public.accounts')")
+    table_exists = cursor.fetchone()[0] is not None
+    cursor.close()
+
+    if not table_exists:
+        mod.create_accounts_table()
+    mod.import_from_json()
+    mod.show_accounts()
+
+
+def run_clanless_import():
+    """阶段0.2: 调用 scripts/import_clanless_players.py
+    从 config/clanless_players.json 导入无公会玩家种子记录（名单为空时脚本自行提示并跳过）"""
+    mod = _load_script_module('import_clanless_players.py')
+    mod.main()
+
+
 def export_single_table(table_name, output_dir):
     """导出单个表到 CSV 文件"""
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -91,6 +129,8 @@ def run():
 
     # 交互式询问
     print("\n--- 任务选项 ---")
+    do_account_import = ask_yes_no("是否执行阶段0.1: 导入采集账号 (accounts.json)？", default=False)
+    do_clanless_import = ask_yes_no("是否执行阶段0.2: 导入无公会玩家id (clanless_players.json)？", default=False)
     do_clan = ask_yes_no("是否执行阶段1: 公会信息同步？", default=True)
 
     force_full_scan = False
@@ -119,6 +159,26 @@ def run():
     # 设置输出目录（从 config/paths.yaml 读取，缺失则使用默认值）
     output_dir = _get_csv_output_dir()
     os.makedirs(output_dir, exist_ok=True)
+
+    # 执行阶段0.1（默认关闭）：导入采集账号，需在阶段1之前（采集依赖账号）
+    if do_account_import:
+        print("\n>>> 阶段 0.1: 导入采集账号 (accounts.json)\n")
+        try:
+            run_account_import()
+        except Exception as e:
+            print(f"导入采集账号失败: {e}")
+    else:
+        print("已跳过阶段0.1 (导入采集账号)")
+
+    # 执行阶段0.2（默认关闭）：导入无公会玩家种子记录，当天阶段2即可采集
+    if do_clanless_import:
+        print("\n>>> 阶段 0.2: 导入无公会玩家id (clanless_players.json)\n")
+        try:
+            run_clanless_import()
+        except Exception as e:
+            print(f"导入无公会玩家失败: {e}")
+    else:
+        print("已跳过阶段0.2 (导入无公会玩家)")
 
     # 执行阶段1
     if do_clan:
