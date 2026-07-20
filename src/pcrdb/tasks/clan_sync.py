@@ -35,16 +35,25 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
     # SQL: 查找活跃公会
     # 逻辑: 按可以 join_clan_id 分组，如果该公会最新快照里有成员登录时间 > 快照时间 - 30天，则视为活跃
     # 注意: player_clan_snapshots 可能很大，这个查询可能慢，需关注性能
-    # 同时排除 clan_snapshots 中 exist=false 的公会（已解散）
     # 排除 join_clan_id=0（无公会玩家标记，不是真实公会，不能对其发起 API 查询）
+    # 解散判定按"最新一条记录 exist=false"：历史上曾被误报解散、但之后又采集到
+    # 存活记录(exist=true 且更晚)的公会不应被排除（旧逻辑只要存在过 false 记录
+    # 就永久排除，导致 API 误报"此行会已解散"后活跃公会永久脱离扫描）
     query_active_sql = """
+        WITH current_disbanded AS (
+            SELECT clan_id FROM (
+                SELECT DISTINCT ON (clan_id) clan_id, exist
+                FROM clan_snapshots
+                ORDER BY clan_id, collected_at DESC
+            ) t WHERE exist = FALSE
+        )
         SELECT p.join_clan_id
         FROM player_clan_snapshots p
         WHERE p.join_clan_id IS NOT NULL
           AND p.join_clan_id <> 0
           AND NOT EXISTS (
-              SELECT 1 FROM clan_snapshots c
-              WHERE c.clan_id = p.join_clan_id AND c.exist = FALSE
+              SELECT 1 FROM current_disbanded d
+              WHERE d.clan_id = p.join_clan_id
           )
         GROUP BY p.join_clan_id
         HAVING MAX(p.last_login_time) > MAX(p.collected_at) - INTERVAL '30 days'
@@ -92,8 +101,13 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
                 return list(range(1, 52001))
 
         print(f"执行强制全量扫描 (1~{max_id + 500})")
-        # 全量扫描时也排除 exist=false 的公会（避免重复请求已解散公会）
-        cursor.execute("SELECT clan_id FROM clan_snapshots WHERE exist = FALSE")
+        # 全量扫描仅排除"从未采集到存活记录"的纯解散公会（避免重复请求真解散公会）；
+        # 曾经存活过、只是最新记录为 false 的公会保留在扫描范围内，以便复核误报
+        cursor.execute("""
+            SELECT clan_id FROM clan_snapshots
+            GROUP BY clan_id
+            HAVING BOOL_OR(exist) = FALSE
+        """)
         disbanded = {r[0] for r in cursor.fetchall()}
         full_list = [i for i in range(1, max_id + 500) if i not in disbanded]
         return full_list
@@ -107,10 +121,38 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
 
     print(f"执行活跃扫描 (活跃: {len(active_clans)} + 新增探测: {new_clan_add})")
     extra_clans = list(range(max_id + 1, max_id + new_clan_add + 1))
-    # 合并去重，额外排除解散公会
-    cursor.execute("SELECT clan_id FROM clan_snapshots WHERE exist = FALSE")
+
+    # 解散复核：最新记录为 false、但 30 天内曾采集到存活记录的公会并入扫描，
+    # 以复核 API 误报。误报者次日会重新查到 exist=true 自动撤销解散标记；
+    # 真解散者持续 false，30 天后自然退出复核窗口，不再重复请求。
+    cursor.execute("""
+        WITH latest AS (
+            SELECT DISTINCT ON (clan_id) clan_id, exist
+            FROM clan_snapshots
+            ORDER BY clan_id, collected_at DESC
+        )
+        SELECT l.clan_id FROM latest l
+        WHERE l.exist = FALSE
+          AND EXISTS (
+              SELECT 1 FROM clan_snapshots c
+              WHERE c.clan_id = l.clan_id AND c.exist = TRUE
+                AND c.collected_at > NOW() - INTERVAL '30 days'
+          )
+    """)
+    recheck_clans = [r[0] for r in cursor.fetchall()]
+    if recheck_clans:
+        print(f"解散复核: 并入 {len(recheck_clans)} 个最新为解散但近30天曾存活的公会")
+
+    # 合并去重，排除"最新记录为解散"的公会（复核集合会被重新加回）
+    cursor.execute("""
+        SELECT clan_id FROM (
+            SELECT DISTINCT ON (clan_id) clan_id, exist
+            FROM clan_snapshots
+            ORDER BY clan_id, collected_at DESC
+        ) t WHERE exist = FALSE
+    """)
     disbanded = {r[0] for r in cursor.fetchall()}
-    final_list = sorted(list(set(active_clans + extra_clans) - disbanded))
+    final_list = sorted((set(active_clans + extra_clans) - disbanded) | set(recheck_clans))
     return final_list
 
 
@@ -347,15 +389,35 @@ def cleanup_phantom_clans():
 
 def deduplicate_clan_snapshots():
     """
-    清理 clan_snapshots 表中 (clan_id, clan_name, leader_viewer_id) 组合的旧记录，
-    仅保留每个组合中 collected_at 最新的一条。
+    清理 clan_snapshots 表中的冗余记录：
+    1. 先删除被"更晚的存活记录"否定的解散记录：某公会存在 exist=false 记录，
+       但其后又采集到 exist=true 记录，说明当初的解散是 API 误报，该 false
+       记录应删除（它与存活记录 clan_name/leader 均为 NULL，不在下一步的分区内，
+       否则会永久残留并把公会挡在扫描范围外）。
+    2. 再按 (clan_id, clan_name, leader_viewer_id) 组合去重，仅保留每组最新一条。
     """
     print("正在进行公会快照去重...")
     start_time = time.time()
-    
+
     conn = get_connection()
     cursor = conn.cursor()
-    
+
+    # 步骤1：清理被更晚存活记录否定的误报解散记录
+    cursor.execute("""
+        DELETE FROM clan_snapshots c
+        WHERE c.exist = FALSE
+          AND EXISTS (
+              SELECT 1 FROM clan_snapshots t
+              WHERE t.clan_id = c.clan_id
+                AND t.exist = TRUE
+                AND t.collected_at > c.collected_at
+          )
+    """)
+    revoked_count = cursor.rowcount
+    if revoked_count:
+        print(f"  清理误报解散记录 {revoked_count} 条（存在更晚的存活证据）")
+
+    # 步骤2：常规组合去重
     delete_sql = """
         DELETE FROM clan_snapshots
         WHERE id IN (
@@ -375,10 +437,10 @@ def deduplicate_clan_snapshots():
     conn.commit()
     cursor.close()
     conn.close()
-    
+
     elapsed = time.time() - start_time
-    print(f"公会去重完成，删除了 {deleted_count} 条重复记录，耗时 {format_duration(elapsed)}")
-    return deleted_count
+    print(f"公会去重完成，删除误报解散 {revoked_count} 条 + 重复记录 {deleted_count} 条，耗时 {format_duration(elapsed)}")
+    return deleted_count + revoked_count
 
 
 def run(new_clan_add: int = 100, force_full_scan: bool = False):
