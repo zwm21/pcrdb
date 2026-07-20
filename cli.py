@@ -21,6 +21,7 @@ def cmd_task(args):
         'grand_sync': grand_sync.run,
         'arena_deck_sync': arena_deck_sync.run,
         'player_profile_sync': player_profile_sync.run,
+        'clanless_recheck': player_profile_sync.run_clanless_recheck,
         'daily_sync': daily_sync.run,  # 新增
     }
     
@@ -56,6 +57,7 @@ def main():
   grand_sync          同步PJJC排名数据
   arena_deck_sync     同步JJC防守阵容
   player_profile_sync 同步玩家档案
+  clanless_recheck    无公会玩家全量复查
 
 示例:
   python cli.py task clan_sync

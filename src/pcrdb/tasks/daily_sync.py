@@ -96,7 +96,9 @@ def run():
     force_full_scan = False
     if do_clan:
         force_full_scan = ask_yes_no("阶段1是否开启全量扫描？(默认 N，全量将忽略活跃判断，扫描全部可能公会ID)", default=False)
-    
+
+    do_recheck = ask_yes_no("是否执行阶段1.5: 无公会玩家全量复查？(默认 N，复查超期无公会玩家与手动登记名单)", default=False)
+
     do_profile = ask_yes_no("是否执行阶段2: 玩家档案同步（全量刷新）？", default=True)
     do_export = ask_yes_no("是否执行阶段3: 导出 CSV 文件？", default=True)
 
@@ -124,6 +126,13 @@ def run():
         clan_sync.run(force_full_scan=force_full_scan)
     else:
         print("已跳过阶段1")
+
+    # 执行阶段1.5（默认关闭）：放在阶段2之前，复查刷新的回归玩家当天即可进入档案采集
+    if do_recheck:
+        print("\n>>> 阶段 1.5: 无公会玩家全量复查\n")
+        player_profile_sync.run_clanless_recheck()
+    else:
+        print("已跳过阶段1.5 (无公会玩家复查)")
 
     # 执行阶段2
     if do_profile:

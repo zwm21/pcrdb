@@ -18,6 +18,7 @@ TASK_TABLES = {
     'clan_sync': ['clan_snapshots', 'player_clan_snapshots'],
     'player_profile_sync': ['player_profile_snapshots'],
     'player_profile_sync_monthly': ['player_profile_snapshots'],
+    'clanless_recheck': ['player_clan_snapshots'],
     'grand_sync': ['grand_arena_snapshots'],
     'arena_deck_sync': ['arena_deck_snapshots'],
 }

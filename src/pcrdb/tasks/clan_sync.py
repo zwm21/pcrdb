@@ -36,10 +36,12 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
     # 逻辑: 按可以 join_clan_id 分组，如果该公会最新快照里有成员登录时间 > 快照时间 - 30天，则视为活跃
     # 注意: player_clan_snapshots 可能很大，这个查询可能慢，需关注性能
     # 同时排除 clan_snapshots 中 exist=false 的公会（已解散）
+    # 排除 join_clan_id=0（无公会玩家标记，不是真实公会，不能对其发起 API 查询）
     query_active_sql = """
         SELECT p.join_clan_id
         FROM player_clan_snapshots p
         WHERE p.join_clan_id IS NOT NULL
+          AND p.join_clan_id <> 0
           AND NOT EXISTS (
               SELECT 1 FROM clan_snapshots c
               WHERE c.clan_id = p.join_clan_id AND c.exist = FALSE

@@ -202,7 +202,11 @@ def process_profile(profile_data: Dict[str, Any], query_id: int = None) -> Dict[
     favorite_unit_id = profile_data['favorite_unit']['id']
 
     user_comment = user.get('user_comment')
-    
+
+    # 提取最后登录时间 (int unix 时间戳，与公会成员接口同格式)
+    login_ts = user.get('last_login_time')
+    last_login = datetime.fromtimestamp(login_ts) if isinstance(login_ts, (int, float)) and login_ts > 0 else None
+
     return {
         'viewer_id': vid,
         'user_name': user.get('user_name', ''),
@@ -216,7 +220,8 @@ def process_profile(profile_data: Dict[str, Any], query_id: int = None) -> Dict[
         'favorite_unit': favorite_unit_id,
         'user_comment': user_comment,
         'princess_knight_rank_total_exp': princess_knight_exp,
-        'talent_quest_clear': talent_clear
+        'talent_quest_clear': talent_clear,
+        'last_login_time': last_login
     }
 
 
@@ -253,7 +258,8 @@ def insert_profile_batch(data_batch: List[Dict], member_info: Dict, collected_at
             'join_clan_name': info.get('join_clan_name'),
             'princess_knight_rank_total_exp': exp,
             'princess_knight_rank': knight_rank,          # 新增字段
-            'talent_quest_clear': Json(data['talent_quest_clear'])
+            'talent_quest_clear': Json(data['talent_quest_clear']),
+            'last_login_time': data.get('last_login_time')
         }
         records.append(record)
     
@@ -353,6 +359,136 @@ def run(mode: str = 'top_clans', rank_limit: int = 30, clear_before: bool = Fals
         task_logger.finish_success(records_fetched=fetch_counter['count'])
     except Exception as e:
         task_logger.finish_failed(str(e), records_fetched=fetch_counter['count'])
+        raise
+
+
+# ===================== 无公会玩家全量复查 =====================
+
+# 手动登记名单路径: 项目根目录 / config / clanless_players.json
+CLANLESS_REGISTRY_PATH = Path(__file__).resolve().parent.parent.parent.parent / 'config' / 'clanless_players.json'
+
+
+def load_clanless_registry() -> List[int]:
+    """读取手动登记的无公会玩家名单，文件缺失或格式错误时返回空列表"""
+    if not CLANLESS_REGISTRY_PATH.exists():
+        return []
+    try:
+        with open(CLANLESS_REGISTRY_PATH, encoding='utf-8') as f:
+            data = json.load(f)
+        return [int(v) for v in data.get('viewer_ids', [])]
+    except Exception as e:
+        print(f"读取登记名单失败 {CLANLESS_REGISTRY_PATH}: {e}")
+        return []
+
+
+def get_recheck_targets() -> List[int]:
+    """
+    构建复查对象列表（不设战力与登录时间门槛）:
+    1. 最新记录为无公会(join_clan_id=0) 且 last_login_time 超期30天/缺失的玩家
+       （30天内活跃的无公会玩家每天由 active_all 覆盖，无需复查）
+    2. config/clanless_players.json 手动登记名单，无条件纳入
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        WITH latest AS (
+            SELECT DISTINCT ON (viewer_id)
+                viewer_id, join_clan_id, last_login_time
+            FROM player_clan_snapshots
+            ORDER BY viewer_id, collected_at DESC
+        )
+        SELECT viewer_id FROM latest
+        WHERE join_clan_id = 0
+          AND (last_login_time IS NULL
+               OR last_login_time <= NOW() - INTERVAL '30 days')
+    """)
+    expired = [r[0] for r in cursor.fetchall()]
+    registry = load_clanless_registry()
+    targets = sorted(set(expired) | set(registry))
+    # 过滤非法 id：viewer_id 必然 > 1万亿（与 TaskQueue 的查询类型判断阈值一致），
+    # 名单中误填的小数字若混入且恰为最小值，会让 TaskQueue 把整个队列误判为公会查询
+    invalid = [t for t in targets if t <= 1000000000000]
+    if invalid:
+        print(f"忽略 {len(invalid)} 个非法 viewer_id: {invalid[:5]}{'...' if len(invalid) > 5 else ''}")
+        targets = [t for t in targets if t > 1000000000000]
+    print(f"复查目标: 超期无公会 {len(expired)} 人 + 登记名单 {len(registry)} 人 = 去重合计 {len(targets)} 人")
+    return targets
+
+
+def process_profile_with_clan(profile_data: Dict[str, Any], query_id: int = None) -> Dict[str, Any]:
+    """process_profile 的复查版包装：附带响应顶层的 clan_name，用于识别已入会玩家"""
+    result = process_profile(profile_data, query_id)
+    if result is not None:
+        result['clan_name'] = profile_data.get('clan_name') or None
+    return result
+
+
+def run_clanless_recheck():
+    """
+    历史无公会玩家全量复查任务
+
+    对复查对象逐个查询 profile，仅刷新 player_clan_snapshots 中的无公会(clan 0)记录
+    （写入真实 last_login_time / total_power），使回归玩家重新满足 active_all 的
+    跟踪条件。发现已加入公会的玩家不写记录，其归属交给公会扫描渠道刷新。
+    不写 player_profile_snapshots，避免破坏每日全量刷新的"每玩家一条"语义；
+    回归玩家将在下一次 active_all 中恢复完整档案采集。
+    """
+    from db.task_logger import TaskLogger
+
+    print("=" * 60)
+    print("无公会玩家全量复查任务")
+    print("=" * 60)
+
+    config = get_config()
+    targets = get_recheck_targets()
+
+    task_logger = TaskLogger('clanless_recheck')
+    task_logger.start(records_expected=len(targets), details={'targets': len(targets)})
+
+    if not targets:
+        print("没有需要复查的玩家")
+        task_logger.finish_success(records_fetched=0)
+        return
+
+    collected_time = datetime.now()
+    stats = {'refreshed': 0, 'in_clan': 0}
+
+    def recheck_inserter(data_batch):
+        records = []
+        for data in data_batch:
+            if not data:
+                continue
+            if data.get('clan_name'):
+                # 玩家实际已加入公会，不写无公会记录
+                stats['in_clan'] += 1
+                continue
+            records.append({
+                'viewer_id': data['viewer_id'],
+                'name': data['user_name'],
+                'level': data['team_level'],
+                'total_power': data['total_power'],
+                'last_login_time': data.get('last_login_time'),
+                'join_clan_id': 0,
+                'join_clan_name': '0'
+            })
+        if records:
+            stats['refreshed'] += len(records)
+            insert_snapshots_batch('player_clan_snapshots', records, collected_at=collected_time)
+
+    try:
+        queue = TaskQueue(
+            query_list=targets,
+            data_processor=process_profile_with_clan,
+            pg_inserter=recheck_inserter,
+            sync_num=config['sync_num'],
+            batch_size=config['batch_size']
+        )
+        queue.run()
+
+        print(f"复查完成: 刷新无公会记录 {stats['refreshed']} 人，发现已入会 {stats['in_clan']} 人")
+        task_logger.finish_success(records_fetched=stats['refreshed'] + stats['in_clan'])
+    except Exception as e:
+        task_logger.finish_failed(str(e), records_fetched=stats['refreshed'])
         raise
 
 

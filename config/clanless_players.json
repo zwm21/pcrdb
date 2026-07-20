@@ -1,0 +1,4 @@
+{
+  "_comment": "无公会玩家手动跟踪登记表。在 viewer_ids 数组中填入玩家 viewer_id（数字），然后运行 python scripts/import_clanless_players.py 导入种子记录开始跟踪。名单内玩家会被无公会全量复查任务（daily_sync 阶段1.5 或 python cli.py task clanless_recheck）无条件复查，即使超过30天未登录也不会永久丢失。",
+  "viewer_ids": []
+}
