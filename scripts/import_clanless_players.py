@@ -2,8 +2,9 @@
 手动导入无公会玩家 viewer_id 进行持续跟踪
 
 用法:
-    1. 在 config/clanless_players.json 的 viewer_ids 数组中填入玩家 viewer_id
-    2. 运行 python scripts/import_clanless_players.py
+    1. 在 config/clanless_players.{渠道}.json 的 viewer_ids 数组中填入玩家 viewer_id
+       (渠道服兼容旧文件 config/clanless_players.json; B服用 clanless_players.bsdk.json)
+    2. 运行 python scripts/import_clanless_players.py [--channel bsdk]
 
 原理:
     为每个 viewer_id 在 player_clan_snapshots 中写入一条无公会(clan 0)种子记录：
@@ -29,8 +30,12 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src' / 'pcrdb'))
 
 from db.connection import get_connection
+from channel import apply_channel_arg, config_file, current
 
-REGISTRY_PATH = Path(__file__).parent.parent / 'config' / 'clanless_players.json'
+
+def _registry_path() -> Path:
+    """登记名单路径按渠道解析"""
+    return config_file('clanless_json')
 
 # 占位战力：满足 active_all 的 total_power > 1000000 门槛，首次采集后被真实值取代
 PLACEHOLDER_POWER = 1000001
@@ -38,12 +43,13 @@ PLACEHOLDER_POWER = 1000001
 
 def load_registry() -> list:
     """读取登记名单"""
-    if not REGISTRY_PATH.exists():
-        print(f"登记文件不存在: {REGISTRY_PATH}")
+    registry_path = _registry_path()
+    if not registry_path.exists():
+        print(f"登记文件不存在: {registry_path}")
         print('请创建该文件，格式: {"viewer_ids": [123456789012345]}')
         return []
 
-    with open(REGISTRY_PATH, encoding='utf-8') as f:
+    with open(registry_path, encoding='utf-8') as f:
         data = json.load(f)
 
     ids = []
@@ -109,11 +115,12 @@ def import_players(viewer_ids: list):
 
 
 def main():
+    ch = apply_channel_arg()
     viewer_ids = load_registry()
     if not viewer_ids:
         print("名单为空，未执行导入")
         return
-    print(f"从 {REGISTRY_PATH.name} 读取到 {len(viewer_ids)} 个 viewer_id\n")
+    print(f"[{current()['name']}] 从 {_registry_path().name} 读取到 {len(viewer_ids)} 个 viewer_id\n")
     import_players(viewer_ids)
 
 

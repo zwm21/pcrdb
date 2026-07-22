@@ -65,6 +65,56 @@ pcrdb/
 3. **环境变量** (`.env`):
    定义数据库连接信息和访问密钥。参考 `.env.example`。
 
+## 双渠道采集 (渠道服 + B服)
+
+pcrdb 支持分别从**渠道服** (qsdk, 默认) 和 **B服** (bsdk, bilibili 官服) 采集数据，
+两服数据写入**同一 PostgreSQL 实例下的两个独立数据库**（默认 `pcrdb` / `pcrdb_bsdk`），互不影响。
+
+### 渠道选择方式（三选一，优先级从高到低）
+
+```bash
+# 1. CLI 全局参数
+python cli.py --channel bsdk task clan_sync
+
+# 2. daily_sync 交互选择 (开头第一个选项, 默认渠道服)
+daily_sync.bat            # 交互选择
+daily_sync.bat bsdk       # 直接指定, 跳过渠道选择
+
+# 3. .env 默认值
+PCRDB_CHANNEL=qsdk
+```
+
+### B服首次配置步骤
+
+```bash
+# 1. 以 postgres 超级用户建库 (zwm 需有所有权)
+CREATE DATABASE pcrdb_bsdk OWNER zwm;
+
+# 2. 初始化表结构
+python scripts/apply_schema.py --channel bsdk
+
+# 3. 填写 B服账号 (B站账号密码, 非 uid/access_key)
+#    编辑 config/accounts.bsdk.json 后导入:
+python scripts/init_accounts.py --channel bsdk
+
+# 4. 试跑公会同步 (空库默认全量扫描 1~400000, 可用 PCRDB_BSDK_FULL_SCAN_MAX 调整)
+python cli.py --channel bsdk task clan_sync
+```
+
+### 渠道差异速查
+
+| 项 | 渠道服 (qsdk) | B服 (bsdk) |
+|---|---|---|
+| 数据库配置 | `PCRDB_*` (兼容) / `PCRDB_QSDK_*` | `PCRDB_BSDK_*` |
+| 账号文件 | `config/accounts.json` | `config/accounts.bsdk.json` |
+| 账号凭据 | 自抓 uid + 共享 access_key | B站账号密码 (自动经 bsgamesdk 换凭据) |
+| 无公会名单 | `config/clanless_players.json` | `config/clanless_players.bsdk.json` |
+| 版本文件 | `version.txt` | `version.bsdk.txt` |
+| 极验过码 | 不需要 | `PCRDB_GEETEST_API` (默认公共服务) |
+
+> **注意**: B服账号密码存于 B服库的 `accounts` 表 (uid/access_key 列)，属敏感信息；
+> 两服 viewer_id / clan_id 体系独立，数据不可跨库混用。
+
 ## CLI 命令
 
 使用 `cli.py` 手动运行采集任务。

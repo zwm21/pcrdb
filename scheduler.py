@@ -35,33 +35,45 @@ def run_task(task_name: str, task_config: dict):
     """运行指定任务（日志记录已集成在各task模块内部）"""
     logger.info(f"开始执行任务: {task_name}")
     start_time = time.time()
-    
+
     try:
+        # 渠道切换 (任务可配置 channel: qsdk/bsdk, 缺省保持当前渠道)
+        # 状态写在环境变量中, 对本进程后续所有 DB/采集操作生效
+        task_channel = task_config.get('channel')
+        if task_channel:
+            from src.pcrdb.channel import set_channel, current as _ch_current
+            set_channel(task_channel)
+            logger.info(f"任务渠道: {_ch_current()['name']} ({task_channel})")
+
+        # 实际执行的任务类型: 可用 task: 字段显式指定 (用于同类型多渠道配置,
+        # 如 clan_sync_bsdk: {task: clan_sync, channel: bsdk}), 缺省与配置键同名
+        actual_task = task_config.get('task', task_name)
+
         # 导入对应的任务模块
-        if task_name == 'clan_sync':
+        if actual_task == 'clan_sync':
             from src.pcrdb.tasks.clan_sync import run
             run()
-        
-        elif task_name == 'player_profile_sync':
+
+        elif actual_task == 'player_profile_sync':
             from src.pcrdb.tasks.player_profile_sync import run
             mode = task_config.get('mode', 'top_clans')
             params = task_config.get('params', {})
             run(mode=mode, **params)
-        
-        elif task_name == 'player_profile_sync_monthly':
+
+        elif actual_task == 'player_profile_sync_monthly':
             from src.pcrdb.tasks.player_profile_sync import run
             run(mode='active_all')
-        
-        elif task_name == 'grand_sync':
+
+        elif actual_task == 'grand_sync':
             from src.pcrdb.tasks.grand_sync import run
             run()
-        
-        elif task_name == 'arena_deck_sync':
+
+        elif actual_task == 'arena_deck_sync':
             from src.pcrdb.tasks.arena_deck_sync import run
             run()
-        
+
         else:
-            logger.warning(f"未知任务: {task_name}")
+            logger.warning(f"未知任务: {actual_task} (配置键: {task_name})")
             return
         
         elapsed = time.time() - start_time

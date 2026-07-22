@@ -364,20 +364,25 @@ def run(mode: str = 'top_clans', rank_limit: int = 30, clear_before: bool = Fals
 
 # ===================== 无公会玩家全量复查 =====================
 
-# 手动登记名单路径: 项目根目录 / config / clanless_players.json
-CLANLESS_REGISTRY_PATH = Path(__file__).resolve().parent.parent.parent.parent / 'config' / 'clanless_players.json'
+# 手动登记名单路径按渠道解析:
+# qsdk -> config/clanless_players.qsdk.json (回退旧 clanless_players.json)
+# bsdk -> config/clanless_players.bsdk.json
+def clanless_registry_path() -> Path:
+    from channel import config_file
+    return config_file('clanless_json')
 
 
 def load_clanless_registry() -> List[int]:
     """读取手动登记的无公会玩家名单，文件缺失或格式错误时返回空列表"""
-    if not CLANLESS_REGISTRY_PATH.exists():
+    registry_path = clanless_registry_path()
+    if not registry_path.exists():
         return []
     try:
-        with open(CLANLESS_REGISTRY_PATH, encoding='utf-8') as f:
+        with open(registry_path, encoding='utf-8') as f:
             data = json.load(f)
         return [int(v) for v in data.get('viewer_ids', [])]
     except Exception as e:
-        print(f"读取登记名单失败 {CLANLESS_REGISTRY_PATH}: {e}")
+        print(f"读取登记名单失败 {registry_path}: {e}")
         return []
 
 

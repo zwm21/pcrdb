@@ -1,6 +1,11 @@
 # 任务调度配置
 # 使用 cron 表达式格式: "分 时 日 月 星期"
 # 或使用简化表达式: "daily", "weekly", "monthly"
+#
+# 双渠道: 任务可加 channel: qsdk(渠道服, 默认) / bsdk(B服)
+# 不填 channel 时使用 .env 的 PCRDB_CHANNEL (默认 qsdk)。
+# 注意: 调度器是单进程, 连续执行不同渠道的任务时会自动切换数据库,
+# 建议两渠道任务错开时间, 避免账号采集并发互相影响。
 
 tasks:
   clan_sync:
@@ -8,7 +13,26 @@ tasks:
     # 用于在月末公会战结算前进行数据同步
     schedule: "0 4 L-3 * *"
     enabled: true
+    # channel: qsdk   # 缺省即 qsdk, 可省略
     description: "公会信息同步（每月倒数第4天执行）"
+
+  # === B服示例 (默认禁用, 配置好 accounts.bsdk.json 后启用) ===
+  # 配置键可自定义, 用 task: 指定实际任务类型, channel: bsdk 指定渠道
+  # clan_sync_bsdk:
+  #   schedule: "30 5 L-3 * *"
+  #   enabled: false
+  #   task: clan_sync
+  #   channel: bsdk
+  #   description: "B服公会信息同步"
+  # player_profile_sync_bsdk:
+  #   schedule: "0 6 * * *"
+  #   enabled: false
+  #   task: player_profile_sync
+  #   channel: bsdk
+  #   mode: "top_clans"
+  #   params:
+  #     rank_limit: 30
+  #   description: "B服玩家档案同步（每日）"
   
   player_profile_sync:
     # 每天凌晨4点30分执行（每日模式：前30公会和战力前500名）

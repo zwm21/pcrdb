@@ -14,18 +14,42 @@ from datetime import datetime
 from re import search
 import time
 from json import loads
-from pathlib import Path
 import aiohttp
 
+# 渠道模块: 兼容 pcrdb.api.client 与顶层 api.client 两种导入方式
+try:
+    from ..channel import (
+        CHANNELS as _CHANNELS,
+        current as _channel_current,
+        version_file_read as _version_file_read,
+        version_file_write as _version_file_write,
+    )
+except ImportError:
+    from channel import (
+        CHANNELS as _CHANNELS,
+        current as _channel_current,
+        version_file_read as _version_file_read,
+        version_file_write as _version_file_write,
+    )
 
-# 版本配置
-_version_file = Path(__file__).parent.parent.parent.parent / 'version.txt'
-_version = "10.7.1"
 
-if _version_file.exists():
-    _version = _version_file.read_text(encoding='utf-8').strip()
-else:
-    _version_file.write_text(_version, encoding='utf-8')
+# 默认客户端版本 (版本文件缺失时的兜底, 首次 game_start 后会自动更新)
+_DEFAULT_VERSION = "10.7.1"
+
+
+def _load_version(channel: str) -> str:
+    """读取渠道客户端版本: 渠道自有版本文件 -> (bsdk 可回退共享 version.txt) -> 默认值"""
+    p = _version_file_read(channel)
+    if p is not None:
+        v = p.read_text(encoding='utf-8').strip()
+        if v:
+            return v
+    return _DEFAULT_VERSION
+
+
+def _save_version(channel: str, version: str):
+    """回写渠道自有版本文件"""
+    _version_file_write(channel).write_text(version, encoding='utf-8')
 
 
 # AES 加密初始向量
@@ -100,17 +124,18 @@ def pack_request(request: dict, key: bytes) -> bytes:
 
 
 class PCRClient:
-    """公主连结游戏客户端"""
-    
-    # 服务器地址
-    URL_ROOT = "https://l3-prod-uo-gs-gzlj.bilibiligame.net/"
-    
-    def __init__(self, viewer_id: int):
+    """公主连结游戏客户端 (渠道感知: qsdk=渠道服 / bsdk=B服)"""
+
+    def __init__(self, viewer_id: int, channel: str = None):
+        ch = _CHANNELS[channel] if channel else _channel_current()
+        self.channel = ch['key']
+        self.url_root = ch['apiroot']
         self.viewer_id = viewer_id
         self.request_id = ""
         self.session_id = ""
         self.manifest = None
-        
+        self._version = _load_version(self.channel)
+
         self.headers = {
             "EXCEL-VER": "1.0.0",
             "SHORT-UDID": "1001341751",
@@ -119,12 +144,12 @@ class PCRClient:
             "DEVICE-ID": "febf37270db0254b8d1f76af92f0419f",
             "DEVICE-NAME": "Google PIXEL 2 XL",
             "GRAPHICS-DEVICE-NAME": "Adreno (TM) 540",
-            "APP-VER": _version,
-            "RES-KEY": "d145b29050641dac2f8b19df0afe0e59",
+            "APP-VER": self._version,
+            "RES-KEY": ch['reskey'],
             "RES-VER": "10002200",
             "KEYCHAIN": "",
-            "CHANNEL-ID": "4",
-            "PLATFORM-ID": "4",
+            "CHANNEL-ID": ch['channel_id'],
+            "PLATFORM-ID": ch['platform_id'],
             "REGION-CODE": "",
             "PLATFORM": "2",
             "PLATFORM-OS-VERSION": "Android OS 7.1.2 / API-25 (NOF26V/4565141)",
@@ -139,8 +164,6 @@ class PCRClient:
     
     async def call_api(self, endpoint: str, request: dict, encrypted: bool = True) -> dict:
         """调用游戏 API"""
-        global _version
-        
         key = create_key()
         
         if encrypted:
@@ -157,7 +180,7 @@ class PCRClient:
             headers["SID"] = self.session_id
         
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600)) as session:
-            response = await session.post(self.URL_ROOT + endpoint, data=data, headers=headers)
+            response = await session.post(self.url_root + endpoint, data=data, headers=headers)
             resp_data = await response.content.read()
         
         if encrypted:
@@ -174,13 +197,13 @@ class PCRClient:
         if not isinstance(ret_header, dict):
             ret_header = {}
         
-        # 更新版本
+        # 更新版本 (按渠道写回各自的版本文件)
         if endpoint == "check/game_start" and "store_url" in ret_header:
             new_version = ret_header["store_url"].split('_')[1][:-4]
-            if new_version != _version:
-                _version = new_version
-                self.headers['APP-VER'] = _version
-                _version_file.write_text(_version, encoding='utf-8')
+            if new_version != self._version:
+                self._version = new_version
+                self.headers['APP-VER'] = new_version
+                _save_version(self.channel, new_version)
         
         # 更新会话信息
         if ret_header.get("sid"):

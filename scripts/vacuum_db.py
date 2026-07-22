@@ -1,23 +1,40 @@
-import psycopg2
-import yaml
-import os
+"""
+对快照表执行 VACUUM FULL 回收磁盘空间
 
-def get_db_config():
-    config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'database.yaml')
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-    return config['postgresql']
+用法:
+    python scripts/vacuum_db.py [--channel bsdk]
+"""
+import sys
+from pathlib import Path
+
+import psycopg2
+
+# 添加项目根目录到路径
+script_dir = Path(__file__).parent
+project_root = script_dir.parent
+sys.path.insert(0, str(project_root / 'src'))
+
 
 def vacuum_db():
+    from pcrdb.channel import apply_channel_arg, current
+    from pcrdb.db.connection import get_config
+
+    apply_channel_arg()
+    cfg_ch = current()
+    cfg = get_config()
+
+    print(f"目标渠道: {cfg_ch['name']}, 数据库: {cfg['database']}")
     print("Starting VACUUM FULL to reclaim disk space...")
     try:
-        db_config = get_db_config()
+        conn = psycopg2.connect(
+            host=cfg['host'], port=cfg['port'],
+            database=cfg['database'], user=cfg['user'], password=cfg['password']
+        )
         # Connect with autocommit=True because VACUUM cannot run inside a transaction block
-        conn = psycopg2.connect(**db_config)
         conn.autocommit = True
-        
+
         cursor = conn.cursor()
-        
+
         tables = [
             'clan_snapshots',
             'player_clan_snapshots',
@@ -25,18 +42,19 @@ def vacuum_db():
             'grand_arena_snapshots',
             'arena_deck_snapshots'
         ]
-        
+
         for table in tables:
             print(f"Vacuuming {table}...")
             cursor.execute(f"VACUUM FULL {table};")
             print(f"✓ {table} compacted.")
-            
+
         cursor.close()
         conn.close()
         print("\n✅ Database optimization completed.")
-            
+
     except Exception as e:
         print(f"Error: {e}")
+
 
 if __name__ == "__main__":
     vacuum_db()

@@ -1,6 +1,8 @@
 """
 更新账号的分场信息
 登录每个账号，查询其 JJC/PJJC 分场，并更新到 accounts 表
+
+用法: python scripts/update_account_groups.py [--channel bsdk]
 """
 import asyncio
 import sys
@@ -11,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src' / 'pcrdb'))
 
 from api.endpoints import create_client
 from db.connection import get_accounts, update_account
+from channel import apply_channel_arg, current
 
 
 async def update_account_worker(account):
@@ -78,6 +81,8 @@ async def main():
 
 
 if __name__ == '__main__':
+    ch = apply_channel_arg()
+    print(f"目标渠道: {current()['name']} ({ch})")
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

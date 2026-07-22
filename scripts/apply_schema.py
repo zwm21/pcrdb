@@ -2,7 +2,8 @@
 执行 schema.sql 更新数据库结构
 
 用法：
-    python scripts/apply_schema.py
+    python scripts/apply_schema.py                  # 渠道服 (默认)
+    python scripts/apply_schema.py --channel bsdk   # B服 (初始化 pcrdb_bsdk 库)
 """
 import sys
 from pathlib import Path
@@ -13,21 +14,18 @@ project_root = script_dir.parent
 sys.path.insert(0, str(project_root / 'src'))
 
 import psycopg2
-from dotenv import load_dotenv
-import os
 
 
 def get_db_config():
-    """从 .env 文件加载数据库配置"""
-    env_file = project_root / '.env'
-    load_dotenv(env_file)
-    
+    """按当前渠道加载数据库配置 (复用 db.connection 的渠道感知逻辑)"""
+    from pcrdb.db.connection import get_config
+    cfg = get_config()
     return {
-        'host': os.getenv('PCRDB_HOST'),
-        'port': int(os.getenv('PCRDB_PORT')),
-        'database': os.getenv('PCRDB_DATABASE'),
-        'user': os.getenv('PCRDB_USER'),
-        'password': os.getenv('PCRDB_PASSWORD')
+        'host': cfg['host'],
+        'port': cfg['port'],
+        'database': cfg['database'],
+        'user': cfg['user'],
+        'password': cfg['password']
     }
 
 
@@ -43,6 +41,7 @@ def apply_schema():
     
     try:
         db_config = get_db_config()
+        print(f"目标数据库: {db_config['database']} @ {db_config['host']}:{db_config['port']}")
         conn = psycopg2.connect(**db_config)
         conn.autocommit = True  # 每条语句独立提交
         
@@ -93,5 +92,9 @@ def apply_schema():
 
 
 if __name__ == "__main__":
+    from pcrdb.channel import apply_channel_arg, current
+    apply_channel_arg()
+    cfg = current()
+    print(f"目标渠道: {cfg['name']}")
     success = apply_schema()
     sys.exit(0 if success else 1)

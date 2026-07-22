@@ -12,10 +12,18 @@ import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 
+# 渠道模块: 兼容 pcrdb.db.connection 与顶层 db.connection 两种导入方式
+try:
+    from ..channel import get_channel, current as _channel_cfg
+except ImportError:
+    from channel import get_channel, current as _channel_cfg
 
-# Module-level connection cache
+
+# Module-level connection cache (记录连接所属渠道, 渠道切换后自愈重建)
 _connection = None
-_config = None
+_connection_channel = None
+# 每渠道配置缓存: {channel: config_dict}
+_configs = {}
 
 
 @dataclass
@@ -32,52 +40,60 @@ class Account:
     note: Optional[str] = None
 
 
-def get_config() -> Dict[str, Any]:
+def get_config(channel: str = None) -> Dict[str, Any]:
     """
     Load database configuration from .env file in project root.
     Priority: OS Environment > .env > defaults
+
+    渠道感知:
+      - qsdk: 优先 PCRDB_QSDK_*, 回退历史无前缀变量 PCRDB_* (兼容旧 .env / docker-compose)
+      - bsdk: 读 PCRDB_BSDK_*
+      - sync_num / batch_size / access_key: 允许 PCRDB_{渠道}_XXX 覆盖, 缺省读全局共享值
     """
-    global _config
-    if _config is not None:
-        return _config
-    
+    ch = channel or get_channel()
+    if ch in _configs:
+        return _configs[ch]
+
+    cfg_ch = _channel_cfg(ch)
+    prefix = cfg_ch['db_prefix']
+    legacy = cfg_ch['db_legacy_fallback']
+
     # Load .env from project root
     project_root = Path(__file__).parent.parent.parent.parent
     env_file = project_root / '.env'
     load_dotenv(env_file)
-    
-    # Read config from environment
-    host = os.getenv('PCRDB_HOST', 'localhost')
-    port = int(os.getenv('PCRDB_PORT', '5432'))
-    database = os.getenv('PCRDB_DATABASE', 'pcrdb')
-    user = os.getenv('PCRDB_USER', 'postgres')
-    password = os.getenv('PCRDB_PASSWORD', '')
-    sync_num = int(os.getenv('PCRDB_SYNC_NUM', '10'))
-    batch_size = int(os.getenv('PCRDB_BATCH_SIZE', '30'))
-    access_key = os.getenv('PCRDB_ACCESS_KEY', '')
 
-    _config = {
-        'host': host,
-        'port': port,
-        'database': database,
-        'user': user,
-        'password': password,
-        'sync_num': sync_num,
-        'batch_size': batch_size,
-        'access_key': access_key
+    def pick(key: str, default=None):
+        v = os.getenv(f'{prefix}_{key}')
+        if v is None and legacy:
+            v = os.getenv(f'PCRDB_{key}')
+        return v if v is not None else default
+
+    _configs[ch] = {
+        'host': pick('HOST', 'localhost'),
+        'port': int(pick('PORT', '5432')),
+        'database': pick('DATABASE', 'pcrdb'),
+        'user': pick('USER', 'postgres'),
+        'password': pick('PASSWORD', ''),
+        'sync_num': int(pick('SYNC_NUM', os.getenv('PCRDB_SYNC_NUM', '10'))),
+        'batch_size': int(pick('BATCH_SIZE', os.getenv('PCRDB_BATCH_SIZE', '30'))),
+        'access_key': pick('ACCESS_KEY', os.getenv('PCRDB_ACCESS_KEY', '')),
+        'channel': ch,
+        'channel_name': cfg_ch['name'],
     }
-    return _config
+    return _configs[ch]
 
 
 
-def create_connection(**kwargs):
+def create_connection(channel: str = None, **kwargs):
     """
     Create a new PostgreSQL connection
-    
+
     Args:
+        channel: 目标渠道 (缺省为当前渠道)
         **kwargs: Additional arguments passed to psycopg2.connect
     """
-    config = get_config()
+    config = get_config(channel)
     # Merge default config with kwargs
     conn_args = {
         'host': config['host'],
@@ -87,19 +103,26 @@ def create_connection(**kwargs):
         'password': config['password']
     }
     conn_args.update(kwargs)
-    
+
     return psycopg2.connect(**conn_args)
 
 
 def get_connection():
     """
     Get PostgreSQL connection (cached)
+
+    渠道感知: 缓存连接记录所属渠道, 若当前渠道已切换 (set_channel 写环境变量),
+    自动关闭旧连接并重连新渠道的库 —— 对调用方透明。
     """
-    global _connection
+    global _connection, _connection_channel
+    ch = get_channel()
     if _connection is not None and not _connection.closed:
-        return _connection
-    
-    _connection = create_connection()
+        if _connection_channel == ch:
+            return _connection
+        close_connection()
+
+    _connection = create_connection(channel=ch)
+    _connection_channel = ch
     return _connection
 
 
@@ -111,10 +134,11 @@ def get_cursor():
 
 def close_connection():
     """Close the cached connection"""
-    global _connection
+    global _connection, _connection_channel
     if _connection is not None:
         _connection.close()
         _connection = None
+    _connection_channel = None
 
 
 def get_accounts(active_only: bool = True) -> List[Account]:

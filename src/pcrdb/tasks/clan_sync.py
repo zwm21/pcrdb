@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tasks.base import TaskQueue, format_duration
 from db.connection import get_connection, insert_snapshots_batch, get_config
+from channel import get_channel, full_scan_max
 
 
 def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> List[int]:
@@ -64,9 +65,10 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
     active_clans = [r[0] for r in cursor.fetchall()]
 
     # 如果是空库 (无历史数据) 且不是生产库，尝试从生产库获取种子列表 (仅用于测试验证)
+    # 仅限渠道服: bsdk 空库绝不可从 qsdk 生产库捞种子 (两服数据不通用)
     if not active_clans:
         current_db = get_config()['database']
-        if current_db != 'pcrdb':
+        if get_channel() == 'qsdk' and current_db != 'pcrdb':
             print(f"当前库 {current_db} 活跃公会为空，尝试从生产库 pcrdb 获取...")
             try:
                 import psycopg2
@@ -97,8 +99,9 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
             cursor.execute("SELECT COALESCE(MAX(clan_id), 0) FROM clan_snapshots WHERE exist = TRUE")
             max_id = cursor.fetchone()[0]
             if max_id == 0:
-                print("无活跃历史数据，执行默认初始化全量范围 1-52000")
-                return list(range(1, 52001))
+                scan_max = full_scan_max()
+                print(f"无活跃历史数据，执行默认初始化全量范围 1-{scan_max}")
+                return list(range(1, scan_max + 1))
 
         print(f"执行强制全量扫描 (1~{max_id + 500})")
         # 全量扫描仅排除"从未采集到存活记录"的纯解散公会（避免重复请求真解散公会）；
@@ -114,8 +117,9 @@ def build_query_list(new_clan_add: int = 100, force_full_scan: bool = False) -> 
 
     # === 常规模式：活跃 + 探测 ===
     if not active_clans:
-        print("无活跃历史数据，执行默认初始化全量范围 1-52000")
-        return list(range(1, 52001))
+        scan_max = full_scan_max()
+        print(f"无活跃历史数据，执行默认初始化全量范围 1-{scan_max}")
+        return list(range(1, scan_max + 1))
 
     max_id = max(active_clans)
 

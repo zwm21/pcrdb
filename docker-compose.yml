@@ -9,10 +9,14 @@ services:
       POSTGRES_USER: ${PCRDB_USER}
       POSTGRES_PASSWORD: ${PCRDB_PASSWORD}
       POSTGRES_DB: ${PCRDB_DATABASE}
+      # B服数据库名 (供 initdb 脚本在首次初始化时建第二个库)
+      PCRDB_BSDK_DATABASE: ${PCRDB_BSDK_DATABASE:-pcrdb_bsdk}
     ports:
       - "127.0.0.1:${PCRDB_PORT:-5432}:5432"
     volumes:
       - ./pgdata:/var/lib/postgresql/data
+      # 首次初始化时自动创建 B服数据库 (见 scripts/docker/initdb/)
+      - ./scripts/docker/initdb:/docker-entrypoint-initdb.d:ro
     logging:
       driver: "json-file"
       options:

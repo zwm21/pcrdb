@@ -2,6 +2,9 @@
 每日同步组合任务
 依次执行 clan_sync 和 player_profile_sync (mode=active_all, clear_before=True)
 完成后可选择性地导出表到 CSV 文件
+
+开头先选择采集渠道: 渠道服(qsdk, 默认) / B服(bsdk), 后续所有阶段
+(账号导入 / 无公会导入 / 采集 / 导出) 均作用于所选渠道的独立数据库。
 """
 import os
 from datetime import datetime
@@ -9,6 +12,7 @@ from pathlib import Path
 
 import yaml
 
+from pcrdb.channel import get_channel, set_channel, current as _channel_current
 from pcrdb.tasks import clan_sync, player_profile_sync
 from pcrdb.db.connection import get_connection
 
@@ -44,6 +48,22 @@ def ask_yes_no(prompt, default=True):
         if response in ('n', 'no'):
             return False
         print("请输入 y 或 n，或直接按回车")
+
+
+def ask_channel(default: str = 'qsdk') -> str:
+    """交互式选择采集渠道，回车采用默认值"""
+    default_num = '1' if default == 'qsdk' else '2'
+    while True:
+        print("  1 = 渠道服 (默认)")
+        print("  2 = B服 (bilibili官服)")
+        response = input(f"请选择采集渠道 [1/2, 回车={default_num}]: ").strip().lower()
+        if response == '':
+            return default
+        if response in ('1', 'qsdk', 'qudao'):
+            return 'qsdk'
+        if response in ('2', 'bsdk', 'b', 'b服'):
+            return 'bsdk'
+        print("请输入 1 或 2，或直接按回车")
 
 
 def _load_script_module(script_name: str):
@@ -85,9 +105,10 @@ def run_clanless_import():
 
 
 def export_single_table(table_name, output_dir):
-    """导出单个表到 CSV 文件"""
+    """导出单个表到 CSV 文件 (bsdk 渠道文件名加 _bsdk 后缀防混淆)"""
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f'{table_name}_{timestamp}.csv'
+    suffix = '_bsdk' if get_channel() == 'bsdk' else ''
+    filename = f'{table_name}{suffix}_{timestamp}.csv'
     filepath = os.path.join(output_dir, filename)
 
     print(f"正在导出 {table_name} 到 {filepath} ...")
@@ -121,10 +142,28 @@ def export_tables_to_csv(table_flags, output_dir):
                 print(f"导出 {table} 失败: {e}")
 
 
-def run():
-    """执行每日组合任务（交互式）"""
+def run(channel: str = None):
+    """执行每日组合任务（交互式）
+
+    Args:
+        channel: 采集渠道 'qsdk' / 'bsdk'。为 None 时交互式选择
+                 (默认值取当前渠道: cli --channel 或 PCRDB_CHANNEL 可预设)
+    """
+    # 阶段0.0: 确定采集渠道 (必须在任何 DB / 采集操作之前)
+    if channel is None:
+        print("=" * 60)
+        print("每日同步组合任务 - 渠道选择")
+        print("=" * 60)
+        channel = ask_channel(default=get_channel())
+    channel = set_channel(channel)
+
+    ch_name = _channel_current()['name']
+    # 显示目标数据库, 防止选错渠道写错库
+    from pcrdb.db.connection import get_config as _get_config
+    _db_cfg = _get_config()
     print("=" * 60)
-    print("开始执行每日同步组合任务")
+    print(f"开始执行每日同步组合任务 [渠道: {ch_name}]")
+    print(f"目标数据库: {_db_cfg['database']} @ {_db_cfg['host']}:{_db_cfg['port']}")
     print("=" * 60)
 
     # 交互式询问
@@ -211,5 +250,5 @@ def run():
         print("已跳过阶段3")
 
     print("=" * 60)
-    print("每日同步组合任务完成")
+    print(f"每日同步组合任务完成 [渠道: {ch_name}]")
     print("=" * 60)

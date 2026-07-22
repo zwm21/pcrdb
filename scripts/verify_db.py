@@ -175,14 +175,18 @@ def compare_structures(schema_tables: dict, db_tables: dict) -> list:
 
 
 def main():
+    from pcrdb.channel import apply_channel_arg, current
+    apply_channel_arg()
+
     schema_path = project_root / 'src' / 'pcrdb' / 'db' / 'schema.sql'
-    
+
     if not schema_path.exists():
         print(f"Error: Schema file not found: {schema_path}")
         return 1
-    
+
     print("Verifying database structure...")
     print(f"Schema file: {schema_path.relative_to(project_root)}")
+    print(f"目标渠道: {current()['name']}")
     print()
     
     # 解析 schema
