@@ -97,9 +97,30 @@ python scripts/apply_schema.py --channel bsdk
 #    编辑 config/accounts.bsdk.json 后导入:
 python scripts/init_accounts.py --channel bsdk
 
-# 4. 试跑公会同步 (空库默认全量扫描 1~400000, 可用 PCRDB_BSDK_FULL_SCAN_MAX 调整)
+# 4. 确认账号可用性 (见下方"账号练度要求")
+python scripts/check_accounts.py --channel bsdk
+
+# 5. (可选) 实测公会 ID 上限, 校准首轮全量扫描范围
+python scripts/probe_clan_max.py --channel bsdk
+
+# 6. 试跑公会同步 (空库默认全量扫描 1~400000, 可用 PCRDB_BSDK_FULL_SCAN_MAX 调整)
 python cli.py --channel bsdk task clan_sync
 ```
+
+### B服账号练度要求（重要）
+
+B服（官服）对低等级账号有**功能解锁门槛**，渠道服没有：
+
+| 功能 | 解锁条件 | 影响的采集任务 |
+|---|---|---|
+| 行会 | 通关主线 NORMAL 3-1 | `clan_sync`、无公会复查 |
+| 竞技场 | 通关主线 NORMAL 4-6 | `arena_deck_sync` |
+| 公主竞技场 | 通关主线 NORMAL 8-15 | `grand_sync` |
+
+未解锁的账号调用对应 API 会返回通用错误"发生了错误。回到标题界面。"。
+**TaskQueue 并发采集时所有活跃账号都会发起查询，因此所有 B服采集号都需要解锁**
+（只需解锁功能，不需要实际加入公会）。`profile/get_profile` 在等级过低时同样会被拒，
+练号后务必用 `check_accounts.py --channel bsdk` 全部验证一遍再跑采集。
 
 ### 渠道差异速查
 
