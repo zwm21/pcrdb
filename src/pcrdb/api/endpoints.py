@@ -61,11 +61,16 @@ class PCRApi:
         self.load, self.home = await self.client.login(uid, access_key)
 
     async def _safe_call(self, endpoint: str, request: dict) -> dict:
-        """安全调用 API，失败时自动重试"""
+        """安全调用 API，失败时自动重试
+
+        异常路径强制刷新凭据: bsdk 的 access_key 长时间后会失效, 走缓存重登
+        仍旧凭据仍旧失败, 需重新过码; qsdk 的 _ensure_sdk_credentials 直接返回,
+        force_refresh 无实际影响。
+        """
         try:
             return await self.client.call_api(endpoint, request)
         except Exception:
-            await self.login()
+            await self.login(force_refresh=True)
             return await self.client.call_api(endpoint, request)
 
     async def query_profile(self, target_viewer_id: int) -> dict:

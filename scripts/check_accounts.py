@@ -95,8 +95,36 @@ async def _stage3_query(client, r: dict):
     return None, None
 
 
+def _cleanup_probe_records(probe_id: int, t0: datetime):
+    """删除本次写入的孤立探针记录 (成功时应保留, 仅失败路径调用)
+
+    按 (clan_id/join_clan_id = probe_id AND collected_at >= t0) 精准匹配, 只删本次;
+    这两个约束都在 UNIQUE 索引里, 定位准且不会误伤同公会的历史合法快照。
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM player_clan_snapshots WHERE join_clan_id = %s AND collected_at >= %s",
+            (probe_id, t0))
+        m = cursor.rowcount
+        cursor.execute(
+            "DELETE FROM clan_snapshots WHERE clan_id = %s AND collected_at >= %s",
+            (probe_id, t0))
+        c = cursor.rowcount
+        conn.commit()
+        cursor.close()
+        if c or m:
+            print(f"    [cleanup] 已清理孤立探针记录: clan {c} 行 + 成员 {m} 行")
+    except Exception as e:
+        print(f"    [cleanup] 清理孤立探针失败(可忽略): {str(e)[:80]}")
+
+
 def _stage4_write(probe_id: int, res: dict, r: dict) -> bool:
-    """级别4: 生产路径真实落库 + 回读验证"""
+    """级别4: 生产路径真实落库 + 回读验证
+
+    落库后任何环节失败, 都会清理刚写入的探针记录, 避免残留污染。
+    """
     item = process_clan_data(res, probe_id)
     if not item or item.get('type') != 'data':
         r['fail'] = 'process_clan_data 未能加工出有效数据'
@@ -108,6 +136,8 @@ def _stage4_write(probe_id: int, res: dict, r: dict) -> bool:
         insert_clan_batch([item])
     except Exception as e:
         r['fail'] = f'insert_clan_batch 失败: {str(e)[:80]}'
+        # 落库本身抛异常, 一般不会有部分写入, 兜底清理一下
+        _cleanup_probe_records(probe_id, t0)
         return False
 
     # 回读验证 (collected_at 由 insert_clan_batch 内部取 now, 必 >= t0)
@@ -125,13 +155,16 @@ def _stage4_write(probe_id: int, res: dict, r: dict) -> bool:
         cursor.close()
     except Exception as e:
         r['fail'] = f'回读验证失败: {str(e)[:80]}'
+        _cleanup_probe_records(probe_id, t0)
         return False
 
     if clan_rows < 1:
         r['fail'] = '落库后回读不到 clan_snapshots 记录'
+        _cleanup_probe_records(probe_id, t0)
         return False
     if member_rows < expected_members:
         r['fail'] = f'成员行数不足: 期望 {expected_members}, 实读 {member_rows}'
+        _cleanup_probe_records(probe_id, t0)
         return False
 
     r['write_info'] = f'写入 clan_snapshots 1 行 + 成员 {member_rows} 行 (探针公会 {probe_id})'
@@ -169,12 +202,16 @@ async def check_one(acc) -> dict:
     return r
 
 
-async def main():
+async def run_check() -> tuple:
+    """执行账号健康检查, 返回 (ok_count, total)
+
+    供外部集成调用 (如 daily_sync 阶段0.15), 不做 sys.exit, 让调用方决定后续动作。
+    """
     cfg = current()
     accounts = get_accounts(active_only=True)
     print(f"目标渠道: {cfg['name']}, 活跃账号: {len(accounts)} 个")
     if not accounts:
-        return 1
+        return 0, 0
 
     fail_stages = set()
     ok_count = 0
@@ -196,7 +233,13 @@ async def main():
         if stage in fail_stages:
             hint = FAIL_HINTS[stage].format(ch=cfg['key'])
             print(f"提示 [{stage}]: {hint}")
-    return 0 if ok_count == len(accounts) else 1
+    return ok_count, len(accounts)
+
+
+async def main():
+    """命令行入口: 全通=0, 有失败=1"""
+    ok, total = await run_check()
+    return 0 if total > 0 and ok == total else 1
 
 
 if __name__ == '__main__':

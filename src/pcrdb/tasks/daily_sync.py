@@ -104,6 +104,22 @@ def run_clanless_import():
     mod.main()
 
 
+def run_account_check() -> tuple:
+    """阶段0.15: 调用 scripts/check_accounts.py 对活跃账号做四级健康检查
+
+    Returns:
+        (ok, total) - ok 个账号四级全过 / total 个活跃账号；total=0 表示无账号
+    """
+    import asyncio
+    mod = _load_script_module('check_accounts.py')
+
+    # Windows 需 SelectorEventLoopPolicy (与 base.TaskQueue.run 一致), asyncio.run
+    # 在新线程首次调用时会读该 policy; 已由 base.py 或前阶段设置过也不影响。
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    return asyncio.run(mod.run_check())
+
+
 def export_single_table(table_name, output_dir):
     """导出单个表到 CSV 文件 (bsdk 渠道文件名加 _bsdk 后缀防混淆)"""
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -169,6 +185,7 @@ def run(channel: str = None):
     # 交互式询问
     print("\n--- 任务选项 ---")
     do_account_import = ask_yes_no("是否执行阶段0.1: 导入采集账号 (accounts.json)？", default=False)
+    do_account_check = ask_yes_no("是否执行阶段0.15: 采集账号健康检查 (四级验证：登录/解锁/查询/落库)？", default=False)
     do_clanless_import = ask_yes_no("是否执行阶段0.2: 导入无公会玩家id (clanless_players.json)？", default=False)
     do_clan = ask_yes_no("是否执行阶段1: 公会信息同步？", default=True)
 
@@ -208,6 +225,29 @@ def run(channel: str = None):
             print(f"导入采集账号失败: {e}")
     else:
         print("已跳过阶段0.1 (导入采集账号)")
+
+    # 执行阶段0.15（默认关闭）：采集账号健康检查，未通过账号在后续采集中会静默漏采
+    # 方案B：若检查失败，交互确认是否继续；用户回车/N 直接中止所有后续阶段
+    if do_account_check:
+        print("\n>>> 阶段 0.15: 采集账号健康检查\n")
+        try:
+            ok, total = run_account_check()
+        except Exception as e:
+            print(f"账号健康检查异常: {e}")
+            if not ask_yes_no("健康检查异常，是否仍继续后续阶段？", default=False):
+                print("已按用户选择中止 daily_sync")
+                return
+        else:
+            if total == 0:
+                print("未找到活跃账号，中止后续阶段")
+                return
+            if ok < total:
+                print(f"⚠ 有 {total - ok} 个账号未通过四级检查，若继续将有部分数据漏采")
+                if not ask_yes_no("是否仍继续后续阶段？", default=False):
+                    print("已按用户选择中止 daily_sync")
+                    return
+    else:
+        print("已跳过阶段0.15 (采集账号健康检查)")
 
     # 执行阶段0.2（默认关闭）：导入无公会玩家种子记录，当天阶段2即可采集
     if do_clanless_import:

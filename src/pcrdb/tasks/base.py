@@ -129,7 +129,7 @@ class TaskQueue:
                             result = await client.query_clan(query_id)
                         else:
                             result = await client.query_profile(query_id)
-                        
+
                         processed = self.data_processor(result, query_id)
                         if processed:
                             data_batch.append(processed)
@@ -139,15 +139,18 @@ class TaskQueue:
                             print(f"\n[DEBUG] Processed returned None for {query_id}")
                     except Exception as e:
                         print(f"\n[DEBUG] Query error for {query_id}: {e}")
-                    
-                if not success and retry < 3:
-                     # 必须使用 await asyncio.sleep，否则会阻塞整个线程
-                     await asyncio.sleep(2)  # 减少等待时间加快重试
-                     try:
-                         await client.login()
-                     except Exception as e:
-                         pass
-                
+
+                    # 中间失败：退避后重登再试；最后一次(retry=3)不重登直接放弃
+                    # 原实现把该分支写在 for 循环外，retry 恒为 3 条件永假，
+                    # 4 次重试零间隔连发且从不重登，此处修正为在循环体内每次失败退避
+                    if retry < 3:
+                        # 必须使用 await asyncio.sleep，否则会阻塞整个线程
+                        await asyncio.sleep(2)  # 减少等待时间加快重试
+                        try:
+                            await client.login()
+                        except Exception:
+                            pass
+
                 self.processed_count += 1
                 self.queue.task_done()
             
