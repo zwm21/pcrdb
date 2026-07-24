@@ -60,9 +60,9 @@ CHANNELS = {
         'clanless_json': ['clanless_players.bsdk.json'],
         # B服读不到自有版本文件时借渠道服 version.txt 做种子 (同一客户端, 版本同源)
         'version_files': ['version.bsdk.txt', 'version.txt'],
-        # B服公会 ID 前沿 2026-07-23 经 probe_clan_max.py 实测约 105~109 万
+        # B服公会 ID 前沿 2026-07-23 经 probe_clan_max.py 实测约 105~109 万,实际采集到的最大id=1073575
         # (空间稀疏且密度不均, 取末个活段+25% 余量; 可 env: PCRDB_BSDK_FULL_SCAN_MAX 覆盖)
-        'full_scan_max': 1370000,
+        'full_scan_max': 1080000,
     },
 }
 
